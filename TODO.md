@@ -9,6 +9,31 @@
 
 ---
 
+# 2026-04-29 Codex 执行记录
+
+- [x] 创建 CAMRAW 多模块 Android 工程骨架：`app`、`core:camera-api`、`core:camera-runtime`、`core:storage`、`core:overlay`、`core:logging`、`providers:fake-camera`、`providers:internal-camera`。
+- [x] 使用 `com.camraw` 命名体系，应用 ID 为 `com.camraw.app`。
+- [x] 建立 Provider + Capability + Session + Controller 核心接口，UI 不直接依赖具体相机实现。
+- [x] 实现 Provider 注册表、设备发现合并、优先级、当前 Session 管理、连接状态 Flow、全局错误 Flow。
+- [x] 实现 Fake Provider，可用于无真实相机时进入拍摄界面并模拟预览、设置、触控对焦、拍摄。
+- [x] 实现 Camera2 内置相机 Provider 基线：设备枚举、CameraCharacteristics 能力报告、TextureView/Surface 预览绑定、低分辨率 YUV 分析采样、JPEG 拍摄、RAW/DNG/RAW+JPEG 按能力尝试、ISO/快门/EV/WB 基础写入、触控 AF 区域。
+- [x] 实现 MediaStore 存储基线：统一文件命名、按日期/设备/类型目录、Sidecar JSON、SHA-256 checksum、失败回滚。
+- [x] 实现 Overlay 处理基线：网格、中心十字、斑马、峰值、直方图处理器。
+- [x] 实现统一日志基线：logcat、本地文件日志、等级、分类、隐私路径脱敏、zip 导出入口。
+- [x] 实现 Apple-inspired Compose 液态玻璃 UI 基线：真实预览亮度采样驱动 tint、RenderEffect blur 路径、噪声纹理、边缘高光、弹簧动效、设备页、拍摄页、参数面板、Debug 面板。
+- [x] 通过 `./gradlew :app:assembleDebug`。
+- [x] 通过 `./gradlew testDebugUnitTest`。
+- [ ] 真机手动验收仍待执行：权限流程、内置相机实际预览、JPEG 保存、RAW/DNG 保存、触控对焦效果、UI 流畅度。
+- [ ] Sony PTP、UVC、Native/libusb 未进入本轮实现，仍按后续 Milestone 推进。
+
+构建环境备注：
+
+- 当前机器 `JAVA_HOME` 为 JDK 25，Gradle 8.x 无法在 JDK 25 上运行；已将 Wrapper 调整为 Gradle 9.4.1。
+- 当前网络对 Google Maven 出现 429，已在 Gradle repositories 中优先加入 Maven 镜像；官方 `google()` / `mavenCentral()` 仍保留为后备。
+- 当前目录现已是 git 仓库，Codex 仅新增/修改项目文件，未改写 git 历史。
+
+---
+
 # 0. 总体原则
 
 ## 0.1 产品原则
