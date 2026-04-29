@@ -1,6 +1,8 @@
 package com.camraw.app
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import com.camraw.core.camera.api.CameraCaptureRequest
 import com.camraw.core.camera.api.CameraConnectionType
 import com.camraw.core.camera.api.CameraDeviceInfo
@@ -68,14 +70,33 @@ class CameraAppController(
     }
 
     suspend fun connectDefault(hasCameraPermission: Boolean) {
-        if (activeSession.value != null) return
         val allDevices = devices.value.ifEmpty {
             runCatching { registry.refreshDevices() }.getOrDefault(emptyList())
         }
-        val preferred = allDevices.firstOrNull {
-            it.connectionType == CameraConnectionType.Internal && (hasCameraPermission || !it.requiresPermission)
-        } ?: allDevices.firstOrNull { it.connectionType == CameraConnectionType.Virtual }
-        preferred?.let { connect(it) }
+        val internal = allDevices.firstOrNull { it.connectionType == CameraConnectionType.Internal }
+        val current = activeSession.value
+
+        if (internal != null && !hasCameraPermission) {
+            if (current?.deviceInfo?.connectionType == CameraConnectionType.Internal) {
+                registry.closeActiveSession()
+            }
+            if (current == null || current.deviceInfo.connectionType == CameraConnectionType.Internal) {
+                _status.value = "需要相机权限"
+                _lastError.value = CameraError(
+                    type = CameraErrorType.PermissionError,
+                    userMessageZh = "需要相机权限才能调用手机原生摄像头",
+                    debugMessage = "Internal camera present, CAMERA permission not granted",
+                    fallbackSuggestionZh = "请授予相机权限后重新连接内置相机。",
+                )
+            }
+            return
+        }
+
+        val preferred = internal?.takeIf { hasCameraPermission || !it.requiresPermission }
+            ?: allDevices.firstOrNull { it.connectionType == CameraConnectionType.Virtual }
+        if (preferred == null) return
+        if (current?.deviceInfo?.providerId == preferred.providerId && current.deviceInfo.id == preferred.id) return
+        connect(preferred)
     }
 
     fun connectAsync(device: CameraDeviceInfo) {
@@ -83,6 +104,17 @@ class CameraAppController(
     }
 
     suspend fun connect(device: CameraDeviceInfo) {
+        if (device.connectionType == CameraConnectionType.Internal && !hasCameraPermission()) {
+            val error = CameraError(
+                type = CameraErrorType.PermissionError,
+                userMessageZh = "需要相机权限才能调用手机原生摄像头",
+                debugMessage = "Attempted to connect internal camera without CAMERA permission",
+                fallbackSuggestionZh = "请授予相机权限后重试。",
+            )
+            _lastError.value = error
+            _status.value = error.userMessageZh
+            return
+        }
         _busy.value = true
         _status.value = "Connecting ${device.displayName}"
         runCatching { registry.connect(device) }
@@ -134,5 +166,9 @@ class CameraAppController(
             debugMessage = throwable.stackTraceToString(),
             fallbackSuggestionZh = "请稍后重试或打开 Debug 查看详情。",
         )
+    }
+
+    private fun hasCameraPermission(): Boolean {
+        return appContext.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 }

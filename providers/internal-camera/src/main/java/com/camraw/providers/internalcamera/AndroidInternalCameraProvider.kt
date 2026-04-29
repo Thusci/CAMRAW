@@ -141,6 +141,9 @@ class AndroidInternalCameraProvider(
     }
 
     override suspend fun connect(device: CameraDeviceInfo): CameraSession {
+        if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException("CAMERA permission is required before connecting ${device.displayName}")
+        }
         val state = connectionStates.getOrPut(device.id) { MutableStateFlow(ConnectionState.Disconnected) }
         state.value = ConnectionState.Connecting
         val characteristics = cameraManager.getCameraCharacteristics(device.id)
@@ -257,6 +260,9 @@ private class AndroidInternalCameraSession(
 
         val wantsJpeg = request.format == CaptureFormat.Jpeg || request.format == CaptureFormat.RawAndJpeg
         val wantsRaw = request.format == CaptureFormat.Raw || request.format == CaptureFormat.RawAndJpeg
+        if (wantsJpeg && jpegReader == null) {
+            return captureFailure(request.format, "JPEG ImageReader is not available in the active capture session")
+        }
         if (wantsRaw && rawReader == null) {
             return CaptureResult(
                 format = request.format,
@@ -488,31 +494,72 @@ private class AndroidInternalCameraSession(
         val surface = previewSurface ?: return
         captureSession?.close()
         captureSession = null
-        createReaders(width, height)
-        captureSession = suspendCancellableCoroutine { continuation ->
-            val surfaces = buildList {
-                add(surface)
-                jpegReader?.surface?.let(::add)
-                rawReader?.surface?.let(::add)
-                analysisReader?.surface?.let(::add)
+        createReaders(width, height, enableRaw = true, enableAnalysis = true)
+        captureSession = runCatching {
+            createCameraSession(device, sessionSurfaces(surface))
+        }.recoverCatching { firstFailure ->
+            closeRawReader()
+            createReaders(width, height, enableRaw = false, enableAnalysis = true)
+            createCameraSession(device, sessionSurfaces(surface)).also {
+                eventFlow.tryEmit(
+                    CameraEvent(
+                        type = CameraEventType.Debug,
+                        message = "Preview session degraded: RAW surface disabled",
+                        metadata = mapOf("reason" to firstFailure.message.orEmpty()),
+                    ),
+                )
             }
-            device.createCaptureSession(
-                surfaces,
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        continuation.resume(session)
-                    }
-
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        continuation.resumeWithException(RuntimeException("Camera session configure failed"))
-                    }
-                },
-                handler,
-            )
+        }.recoverCatching { secondFailure ->
+            closeAnalysisReader()
+            createReaders(width, height, enableRaw = false, enableAnalysis = false)
+            createCameraSession(device, sessionSurfaces(surface)).also {
+                eventFlow.tryEmit(
+                    CameraEvent(
+                        type = CameraEventType.Debug,
+                        message = "Preview session degraded: analysis surface disabled",
+                        metadata = mapOf("reason" to secondFailure.message.orEmpty()),
+                    ),
+                )
+            }
+        }.getOrElse { throwable ->
+            throw RuntimeException("Unable to configure internal camera preview session", throwable)
         }
     }
 
-    private fun createReaders(width: Int, height: Int) {
+    private suspend fun createCameraSession(
+        device: CameraDevice,
+        surfaces: List<Surface>,
+    ): CameraCaptureSession = suspendCancellableCoroutine { continuation ->
+        device.createCaptureSession(
+            surfaces,
+            object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    if (continuation.isActive) continuation.resume(session)
+                }
+
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    session.close()
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(
+                            RuntimeException("Camera session configure failed for ${surfaces.size} surfaces"),
+                        )
+                    }
+                }
+            },
+            handler,
+        )
+    }
+
+    private fun sessionSurfaces(preview: Surface): List<Surface> {
+        return buildList {
+            add(preview)
+            jpegReader?.surface?.let(::add)
+            rawReader?.surface?.let(::add)
+            analysisReader?.surface?.let(::add)
+        }
+    }
+
+    private fun createReaders(width: Int, height: Int, enableRaw: Boolean, enableAnalysis: Boolean) {
         val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val jpegSize = streamMap?.getOutputSizes(ImageFormat.JPEG)?.largest()
             ?: Size(max(1, width), max(1, height))
@@ -530,7 +577,7 @@ private class AndroidInternalCameraSession(
                 }, handler)
             }
         }
-        if (rawReader == null && capabilityFlow.value.isSupported(CameraCapability.CaptureRaw) && rawSize != null) {
+        if (enableRaw && rawReader == null && capabilityFlow.value.isSupported(CameraCapability.CaptureRaw) && rawSize != null) {
             rawReader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, 2).apply {
                 setOnImageAvailableListener({ reader ->
                     val image = reader.acquireNextImage()
@@ -540,7 +587,7 @@ private class AndroidInternalCameraSession(
                 }, handler)
             }
         }
-        if (analysisReader == null) {
+        if (enableAnalysis && analysisReader == null) {
             analysisReader = ImageReader.newInstance(yuvSize.width, yuvSize.height, ImageFormat.YUV_420_888, 3).apply {
                 setOnImageAvailableListener({ reader ->
                     reader.acquireLatestImage()?.use { image ->
@@ -560,6 +607,16 @@ private class AndroidInternalCameraSession(
                 }, handler)
             }
         }
+    }
+
+    private fun closeRawReader() {
+        rawReader?.close()
+        rawReader = null
+    }
+
+    private fun closeAnalysisReader() {
+        analysisReader?.close()
+        analysisReader = null
     }
 
     private fun captureFailure(format: CaptureFormat, debug: String): CaptureResult {
@@ -585,7 +642,19 @@ private class AndroidInternalPreviewController(
     override suspend fun bind(surface: PreviewSurface) {
         val native = surface.nativeSurface as? Surface
             ?: throw IllegalArgumentException("Internal camera requires android.view.Surface")
-        session.bindPreview(native, surface.width, surface.height)
+        runCatching {
+            session.bindPreview(native, surface.width, surface.height)
+        }.onFailure { throwable ->
+            state.value = PreviewState(
+                running = false,
+                error = CameraError(
+                    type = CameraErrorType.PreviewFailed,
+                    userMessageZh = "手机原生摄像头预览启动失败",
+                    debugMessage = throwable.stackTraceToString(),
+                    fallbackSuggestionZh = "请确认相机权限已授予，且没有其他应用正在占用摄像头。",
+                ),
+            )
+        }.getOrThrow()
     }
 
     override suspend fun unbind() {

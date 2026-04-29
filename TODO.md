@@ -23,6 +23,9 @@
 - [x] 实现 Apple-inspired Compose 液态玻璃 UI 基线：真实预览亮度采样驱动 tint、RenderEffect blur 路径、噪声纹理、边缘高光、弹簧动效、设备页、拍摄页、参数面板、Debug 面板。
 - [x] 通过 `./gradlew :app:assembleDebug`。
 - [x] 通过 `./gradlew testDebugUnitTest`。
+- [x] 修复未授权时自动连接 Fake Provider 导致授权后不切换手机原生摄像头的问题。
+- [x] 修复内置相机 Provider 权限不足时错误暴露太晚的问题：现在 connect 阶段即拒绝并返回权限错误。
+- [x] 增强 Camera2 预览启动鲁棒性：预览 session 配置失败时会依次禁用 RAW surface、分析 surface 后重试，并把预览错误显示到 UI。
 - [ ] 真机手动验收仍待执行：权限流程、内置相机实际预览、JPEG 保存、RAW/DNG 保存、触控对焦效果、UI 流畅度。
 - [ ] Sony PTP、UVC、Native/libusb 未进入本轮实现，仍按后续 Milestone 推进。
 

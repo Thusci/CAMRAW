@@ -255,6 +255,8 @@ private fun CameraScreen(
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     val scope = rememberCoroutineScope()
     val captureState = session.capture?.captureState?.collectAsStateWithLifecycle()?.value ?: CaptureState.Idle
+    val previewState = session.preview?.previewState?.collectAsStateWithLifecycle()?.value
+        ?: com.camraw.core.camera.api.PreviewState()
 
     LaunchedEffect(session.sessionId) {
         session.preview?.frames?.collect { frame ->
@@ -321,7 +323,7 @@ private fun CameraScreen(
                 .padding(bottom = 18.dp),
         )
         ErrorBanner(
-            error = error,
+            error = error ?: previewState.error,
             backdrop = backdrop,
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -583,6 +585,7 @@ private fun CameraPreviewHost(session: CameraSession, modifier: Modifier = Modif
                     private var surface: Surface? = null
 
                     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+                        texture.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
                         surface = Surface(texture)
                         scope.launch {
                             runCatching {
@@ -591,14 +594,21 @@ private fun CameraPreviewHost(session: CameraSession, modifier: Modifier = Modif
                                         nativeSurface = surface ?: return@runCatching,
                                         width = width,
                                         height = height,
-                                        rotationDegrees = display?.rotation ?: 0,
+                                        rotationDegrees = when (display?.rotation) {
+                                            Surface.ROTATION_90 -> 90
+                                            Surface.ROTATION_180 -> 180
+                                            Surface.ROTATION_270 -> 270
+                                            else -> 0
+                                        },
                                     ),
                                 )
                             }
                         }
                     }
 
-                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
+                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+                        texture.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                    }
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
                         val oldSurface = surface
