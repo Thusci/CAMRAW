@@ -1,0 +1,16 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml:2:13-83
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml:2:13-83
+	package
+		INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml
+	xmlns:android
+		ADDED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml:2:23-81
+uses-sdk
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml reason: use-sdk injection requested
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml
+	android:targetSdkVersion
+		INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml
+	android:minSdkVersion
+		INJECTED from /home/thusci/Documents/Dev/CAMRAW/providers/internal-camera/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5747489793135927201.xml

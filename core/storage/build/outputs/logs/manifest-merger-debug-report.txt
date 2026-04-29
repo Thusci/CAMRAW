@@ -1,0 +1,16 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml:2:13-83
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml:2:13-83
+	package
+		INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml
+	xmlns:android
+		ADDED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml:2:23-81
+uses-sdk
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml reason: use-sdk injection requested
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml
+INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml
+	android:targetSdkVersion
+		INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml
+	android:minSdkVersion
+		INJECTED from /home/thusci/Documents/Dev/CAMRAW/core/storage/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8331809509431069056.xml

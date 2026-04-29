@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.camraw.app-mergeDebugResources-38:/values-v30/values-v30.xml",
+            "map": [
+                {
+                    "source": "/home/thusci/.gradle/caches/9.4.1/transforms/76bff429c046041b21fa8ab3ab077bc7/transformed/material3/res/values-v30/values-v30.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "72",
+                        "endOffsets": "123"
+                    }
+                }
+            ]
+        }
+    ]
+}
