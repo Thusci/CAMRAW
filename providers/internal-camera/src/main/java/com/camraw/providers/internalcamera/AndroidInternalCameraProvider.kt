@@ -149,7 +149,7 @@ class AndroidInternalCameraProvider(
             cameraManager = cameraManager,
             deviceInfo = device.copy(requiresPermission = false),
             characteristics = characteristics,
-            storageController = storageController,
+            storage = storageController,
         )
         state.value = ConnectionState.Connected(session.sessionId)
         return session
@@ -794,7 +794,7 @@ private fun buildCapabilities(
     val raw = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW in capabilities
     val manualSensor = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in capabilities
     val hasEv = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) != null
-    val hasWb = !characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES).isNullOrEmpty()
+    val hasWb = characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.isNotEmpty() == true
     val maxAfRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
 
     val available = buildSet {

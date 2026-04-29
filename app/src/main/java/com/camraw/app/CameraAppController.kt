@@ -109,12 +109,13 @@ class CameraAppController(
         _busy.value = true
         _status.value = "Capturing"
         val result = capture.capture(CameraCaptureRequest(format = format))
+        val error = result.error
         _lastCapture.value = result
-        _lastError.value = result.error
-        _status.value = if (result.error == null) {
+        _lastError.value = error
+        _status.value = if (error == null) {
             "Saved ${result.files.count { it.kind.name != "Sidecar" }} file(s)"
         } else {
-            result.error.userMessageZh
+            error.userMessageZh
         }
         _busy.value = false
     }
