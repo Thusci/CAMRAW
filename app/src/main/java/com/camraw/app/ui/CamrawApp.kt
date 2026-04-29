@@ -1,12 +1,17 @@
 package com.camraw.app.ui
 
+import android.graphics.Paint
 import android.graphics.SurfaceTexture
+import android.graphics.Typeface
 import android.view.Surface
 import android.view.TextureView
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -14,7 +19,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +39,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -59,25 +68,29 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.camraw.app.CameraAppController
 import com.camraw.app.ui.theme.GlassBottomSheet
 import com.camraw.app.ui.theme.GlassControl
-import com.camraw.app.ui.theme.GlassTextButton
 import com.camraw.app.ui.theme.LiquidGlassSurface
 import com.camraw.app.ui.theme.PreviewBackdrop
 import com.camraw.app.ui.theme.ShutterButton
 import com.camraw.core.camera.api.CameraConnectionType
 import com.camraw.core.camera.api.CameraDeviceInfo
 import com.camraw.core.camera.api.CameraError
+import com.camraw.core.camera.api.CameraSettingDescriptor
 import com.camraw.core.camera.api.CameraSession
 import com.camraw.core.camera.api.CapabilityState
 import com.camraw.core.camera.api.CaptureFormat
@@ -86,6 +99,8 @@ import com.camraw.core.camera.api.FocusPoint
 import com.camraw.core.camera.api.PreviewSurface
 import com.camraw.core.camera.api.SettingValue
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 fun CamrawApp(
@@ -446,11 +461,26 @@ private fun SettingsPanel(
 ) {
     val settings = session.settings?.settings?.collectAsStateWithLifecycle()?.value ?: emptyList()
     val scope = rememberCoroutineScope()
+    val proSettings = settings
+        .filter { it.id in ProSettingOrder }
+        .sortedBy { ProSettingOrder.indexOf(it.id) }
+    val selectableSettings = proSettings.filter {
+        it.state == CapabilityState.Available && it.writable && it.availableValues.isNotEmpty()
+    }
+    var activeSettingId by remember(session.sessionId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(selectableSettings.map { it.id }) {
+        if (activeSettingId !in selectableSettings.map { it.id }) {
+            activeSettingId = selectableSettings.firstOrNull()?.id
+        }
+    }
+    val activeSetting = selectableSettings.firstOrNull { it.id == activeSettingId }
+        ?: selectableSettings.firstOrNull()
+
     GlassBottomSheet(visible = visible, backdrop = backdrop, modifier = modifier.fillMaxWidth()) {
         Column(Modifier.navigationBarsPadding()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "Controls",
+                    text = "PRO",
                     color = Color.White,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold,
@@ -459,26 +489,331 @@ private fun SettingsPanel(
                 GlassControl(Icons.Rounded.Close, "Close", backdrop = backdrop, onClick = onClose)
             }
             Spacer(Modifier.height(16.dp))
-            settings.filter { it.state == CapabilityState.Available }.forEach { setting ->
-                Column(Modifier.padding(vertical = 8.dp)) {
-                    Text(setting.displayName, color = Color.White, style = MaterialTheme.typography.labelLarge)
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(top = 8.dp),
-                    ) {
-                        setting.availableValues.take(5).forEach { value ->
-                            GlassTextButton(
-                                text = value.label,
-                                backdrop = backdrop,
-                            ) {
-                                scope.launch { session.settings?.writeSetting(setting.id, value) }
-                            }
-                        }
-                    }
+            if (selectableSettings.isEmpty()) {
+                Text(
+                    text = proSettings.firstOrNull()?.userReadableReason ?: "当前设备未开放手动拍摄参数",
+                    color = Color.White.copy(alpha = 0.72f),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                ProSettingStrip(
+                    settings = selectableSettings,
+                    activeSettingId = activeSetting?.id,
+                    backdrop = backdrop,
+                    onSelect = { activeSettingId = it.id },
+                )
+                Spacer(Modifier.height(18.dp))
+                activeSetting?.let { setting ->
+                    ProParameterWheel(
+                        setting = setting,
+                        backdrop = backdrop,
+                        onValueCommitted = { value ->
+                            scope.launch { session.settings?.writeSetting(setting.id, value) }
+                        },
+                    )
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ProSettingStrip(
+    settings: List<CameraSettingDescriptor>,
+    activeSettingId: String?,
+    backdrop: PreviewBackdrop,
+    onSelect: (CameraSettingDescriptor) -> Unit,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        settings.forEach { setting ->
+            ProSettingChip(
+                setting = setting,
+                selected = setting.id == activeSettingId,
+                backdrop = backdrop,
+                onClick = { onSelect(setting) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProSettingChip(
+    setting: CameraSettingDescriptor,
+    selected: Boolean,
+    backdrop: PreviewBackdrop,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (selected) 1.03f else 1f,
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMedium),
+        label = "pro-chip-scale",
+    )
+    LiquidGlassSurface(
+        modifier = modifier
+            .height(58.dp)
+            .widthIn(min = 58.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            ),
+        backdrop = backdrop,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+        blurRadius = if (selected) 28.dp else 18.dp,
+        tonalOpacity = if (selected) 0.70f else 0.46f,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Text(
+                text = setting.shortLabel(),
+                color = if (selected) Color(0xFFB9ECFF) else Color.White.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = setting.currentValue.displayLabel(),
+                color = Color.White,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProParameterWheel(
+    setting: CameraSettingDescriptor,
+    backdrop: PreviewBackdrop,
+    onValueCommitted: (SettingValue) -> Unit,
+) {
+    val values = setting.availableValues
+    val selectedIndex = values.indexOfFirst { value -> setting.currentValue.sameValueAs(value) }
+        .takeIf { it >= 0 }
+        ?: 0
+    val choicesKey = values.joinToString("|") { it.debugValue }
+    val density = LocalDensity.current
+    val tickSpacingPx = with(density) { 34.dp.toPx() }
+    val tickStroke = with(density) { 1.25.dp.toPx() }
+    val selectedStroke = with(density) { 2.dp.toPx() }
+    val smallTick = with(density) { 12.dp.toPx() }
+    val mediumTick = with(density) { 22.dp.toPx() }
+    val selectedTick = with(density) { 36.dp.toPx() }
+    val centerTop = with(density) { 16.dp.toPx() }
+    val textBaseline = with(density) { 88.dp.toPx() }
+    val labelTextSize = with(density) { 11.sp.toPx() }
+    val selectedTextSize = with(density) { 13.sp.toPx() }
+    val maxOffset = ((values.size - 1).coerceAtLeast(0) * tickSpacingPx)
+    var wheelOffset by remember(setting.id, choicesKey) { mutableStateOf(selectedIndex * tickSpacingPx) }
+    var dragging by remember(setting.id, choicesKey) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val liveIndex = if (values.isEmpty()) {
+        0
+    } else {
+        (wheelOffset / tickSpacingPx).roundToInt().coerceIn(0, values.lastIndex)
+    }
+    val liveValue = values.getOrNull(liveIndex) ?: setting.currentValue
+    val textPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+    }
+    val selectedTextPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+    }
+
+    LaunchedEffect(setting.id, choicesKey, selectedIndex, tickSpacingPx) {
+        if (!dragging) {
+            wheelOffset = selectedIndex * tickSpacingPx
+        }
+    }
+
+    LiquidGlassSurface(
+        backdrop = backdrop,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+        blurRadius = 30.dp,
+        tonalOpacity = 0.64f,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = setting.shortLabel(),
+                        color = Color.White.copy(alpha = 0.72f),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Text(
+                        text = liveValue.displayLabel(),
+                        color = Color.White,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    text = setting.displayName,
+                    color = Color.White.copy(alpha = 0.52f),
+                    style = MaterialTheme.typography.labelLarge,
+                    textAlign = TextAlign.End,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(108.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .draggable(
+                            orientation = Orientation.Horizontal,
+                            state = rememberDraggableState { delta ->
+                                dragging = true
+                                wheelOffset = (wheelOffset - delta).coerceIn(0f, maxOffset)
+                            },
+                            onDragStopped = { velocity ->
+                                dragging = false
+                                val projectedOffset = (wheelOffset - velocity * 0.10f).coerceIn(0f, maxOffset)
+                                val targetIndex = if (values.isEmpty()) {
+                                    0
+                                } else {
+                                    (projectedOffset / tickSpacingPx).roundToInt().coerceIn(0, values.lastIndex)
+                                }
+                                val targetOffset = targetIndex * tickSpacingPx
+                                scope.launch {
+                                    val anim = Animatable(wheelOffset)
+                                    anim.animateTo(
+                                        targetValue = targetOffset,
+                                        animationSpec = spring(
+                                            dampingRatio = 0.78f,
+                                            stiffness = Spring.StiffnessMedium,
+                                        ),
+                                    ) {
+                                        wheelOffset = value.coerceIn(0f, maxOffset)
+                                    }
+                                    values.getOrNull(targetIndex)?.let { targetValue ->
+                                        if (!setting.currentValue.sameValueAs(targetValue)) {
+                                            onValueCommitted(targetValue)
+                                        }
+                                    }
+                                }
+                            },
+                        ),
+                ) {
+                    val centerX = size.width / 2f
+                    val railY = centerTop + selectedTick / 2f
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.16f),
+                        start = Offset(0f, railY),
+                        end = Offset(size.width, railY),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                    values.forEachIndexed { index, value ->
+                        val x = centerX + index * tickSpacingPx - wheelOffset
+                        if (x > -tickSpacingPx && x < size.width + tickSpacingPx) {
+                            val distance = abs(index - liveIndex).coerceAtMost(6)
+                            val alpha = (1f - distance * 0.13f).coerceIn(0.18f, 1f)
+                            val selected = index == liveIndex
+                            val major = selected || index == 0 || values.size <= 14 || index % 2 == 0
+                            val tickHeight = when {
+                                selected -> selectedTick
+                                major -> mediumTick
+                                else -> smallTick
+                            }
+                            val color = if (selected) Color(0xFFB9ECFF) else Color.White.copy(alpha = 0.52f * alpha)
+                            drawLine(
+                                color = color,
+                                start = Offset(x, railY - tickHeight / 2f),
+                                end = Offset(x, railY + tickHeight / 2f),
+                                strokeWidth = if (selected) selectedStroke else tickStroke,
+                            )
+                            val shouldDrawLabel = selected || value.isAuto() || values.size <= 12 || index % 2 == 0
+                            if (shouldDrawLabel) {
+                                val paint = if (selected) selectedTextPaint else textPaint
+                                paint.textSize = if (selected) selectedTextSize else labelTextSize
+                                paint.color = if (selected) {
+                                    android.graphics.Color.rgb(185, 236, 255)
+                                } else {
+                                    android.graphics.Color.argb((190 * alpha).toInt(), 255, 255, 255)
+                                }
+                                drawContext.canvas.nativeCanvas.drawText(
+                                    value.displayLabel(maxLength = 8),
+                                    x,
+                                    textBaseline,
+                                    paint,
+                                )
+                            }
+                        }
+                    }
+                    drawLine(
+                        color = Color(0xFFB9ECFF).copy(alpha = 0.94f),
+                        start = Offset(centerX, 4.dp.toPx()),
+                        end = Offset(centerX, 72.dp.toPx()),
+                        strokeWidth = 1.6.dp.toPx(),
+                    )
+                    drawCircle(
+                        color = Color.White.copy(alpha = 0.92f),
+                        radius = 3.5.dp.toPx(),
+                        center = Offset(centerX, railY),
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val ProSettingOrder = listOf("iso", "shutter", "ev", "wb")
+
+private fun CameraSettingDescriptor.shortLabel(): String {
+    return when (id) {
+        "iso" -> "ISO"
+        "shutter" -> "S"
+        "ev" -> "EV"
+        "wb" -> "WB"
+        else -> displayName
+    }
+}
+
+private fun SettingValue?.displayLabel(maxLength: Int = Int.MAX_VALUE): String {
+    val value = this
+    val raw = value?.label?.ifBlank { value.debugValue }.orEmpty().ifBlank { "--" }
+    val label = if (raw.equals("auto", ignoreCase = true)) "AUTO" else raw
+    return if (label.length <= maxLength) {
+        label
+    } else {
+        "${label.take((maxLength - 2).coerceAtLeast(1))}..."
+    }
+}
+
+private fun SettingValue?.sameValueAs(other: SettingValue): Boolean {
+    return this?.debugValue == other.debugValue || this?.label == other.label
+}
+
+private fun SettingValue.isAuto(): Boolean {
+    return debugValue.equals("auto", ignoreCase = true) || label.equals("auto", ignoreCase = true)
 }
 
 @Composable
