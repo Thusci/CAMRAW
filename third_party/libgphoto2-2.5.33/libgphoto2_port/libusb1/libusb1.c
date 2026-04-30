@@ -125,6 +125,21 @@ static struct _GPPortExternalSysDevice {
 	libusb_device *dl[1];
 } external_sys_device = { NULL, NULL, NULL, { NULL } };
 
+static void clear_external_fd()
+{
+	if (external_sys_device.h) {
+		libusb_close(external_sys_device.h);
+		external_sys_device.h = NULL;
+	}
+	if (external_sys_device.ctx) {
+		libusb_exit(external_sys_device.ctx);
+		external_sys_device.ctx = NULL;
+	}
+	external_sys_device.d = NULL;
+	external_sys_device.dl[0] = NULL;
+	gp_port_usb_set_sys_device(-1);
+}
+
 static int has_external_fd()
 {
 	if (gp_port_usb_get_sys_device() == -1)
@@ -439,7 +454,8 @@ gp_libusb1_exit (GPPort *port)
 		if (!has_external_fd())
 #endif
 		{
-			libusb_exit (port->pl->ctx);
+			if (port->pl->ctx)
+				libusb_exit (port->pl->ctx);
 		}
 		free (port->pl);
 		port->pl = NULL;
@@ -622,6 +638,9 @@ gp_libusb1_close (GPPort *port)
 
 	libusb_close (port->pl->dh);
 #ifdef HAVE_LIBUSB_WRAP_SYS_DEVICE
+	} else {
+		clear_external_fd();
+		port->pl->ctx = NULL;
 	}
 #endif
 

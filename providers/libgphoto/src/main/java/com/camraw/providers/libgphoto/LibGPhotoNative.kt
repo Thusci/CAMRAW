@@ -19,6 +19,10 @@ object LibGPhotoNative {
         System.loadLibrary("camraw_gphoto_bridge")
     }.exceptionOrNull()
 
+    fun configureRuntime(nativeLibraryDir: String?) {
+        loadError ?: runCatching { nativeConfigureRuntime(nativeLibraryDir.orEmpty()) }
+    }
+
     fun backendVersion(): String {
         val error = loadError
         if (error != null) return "native-load-failed:${error::class.java.simpleName}:${error.message}"
@@ -32,6 +36,10 @@ object LibGPhotoNative {
         val handle = runCatching { nativeOpenFromFd(fd, vendorId, productId) }
             .getOrElse { return NativeResult.failure(LibGPhotoErrorMapper.nativeFailure("openFromFd", it)) }
         if (handle <= 0L) {
+            val errorJson = runCatching { nativeLastOpenErrorJson() }.getOrNull()
+            if (!errorJson.isNullOrBlank() && errorJson.contains("\"error\"")) {
+                return NativeResult.failure(LibGPhotoErrorMapper.jsonFailure("openFromFd", errorJson))
+            }
             return NativeResult.failure(LibGPhotoErrorMapper.codeFailure("openFromFd", -1))
         }
         return NativeResult.success(handle)
@@ -103,7 +111,9 @@ object LibGPhotoNative {
         }
     }
 
+    private external fun nativeConfigureRuntime(nativeLibraryDir: String)
     private external fun nativeBackendVersion(): String
+    private external fun nativeLastOpenErrorJson(): String
     private external fun nativeOpenFromFd(fd: Int, vendorId: Int, productId: Int): Long
     private external fun nativeClose(handle: Long): Int
     private external fun nativeGetDeviceInfoJson(handle: Long): String

@@ -85,6 +85,7 @@ class LibGPhotoProvider(
     }
 
     init {
+        LibGPhotoNative.configureRuntime(appContext.applicationInfo.nativeLibraryDir)
         val filter = IntentFilter(actionUsbPermission)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             appContext.registerReceiver(permissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -152,6 +153,7 @@ class LibGPhotoProvider(
         }
 
         state.value = ConnectionState.Connecting
+        LibGPhotoNative.configureRuntime(appContext.applicationInfo.nativeLibraryDir)
         val connection = usbManager.openDevice(usbDevice)
             ?: throw LibGPhotoException(openFailed(device, usbDevice))
         val openResult = LibGPhotoNative.openFromFd(connection.fileDescriptor, usbDevice.vendorId, usbDevice.productId)

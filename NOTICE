@@ -5,7 +5,9 @@ This product includes CAMRAW-authored Android, Kotlin, Compose, and JNI bridge c
 Planned native tether components:
 - libusb 1.0.29
 - libgphoto2 2.5.33
+- GNU libtool/libltdl 2.4.7
 
 Current native tether state:
-- libusb 1.0.29 source is compiled into the Android fd bridge.
-- libgphoto2 2.5.33 source is present under `third_party/`, but operations requiring libgphoto2 return structured unsupported errors until the full backend is initialized.
+- GNU libtool/libltdl 2.4.7, libusb 1.0.29, and libgphoto2 2.5.33 are built from official source releases for Android arm64-v8a.
+- libgphoto2 keeps dynamic `camlibs/ptp2` and `iolibs/usb1` loading through libltdl.
+- USB access uses Android UsbManager authorization and an fd bridge; native code closes only its duplicated fd.

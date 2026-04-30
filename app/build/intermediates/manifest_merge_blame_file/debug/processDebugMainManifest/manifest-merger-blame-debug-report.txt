@@ -45,7 +45,7 @@
 29        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
 29-->[androidx.core:core:1.16.0] /home/thusci/.gradle/caches/9.4.1/transforms/abddf3d5516f904dcc7662b033fb58f1/transformed/core-1.16.0/AndroidManifest.xml:28:18-86
 30        android:debuggable="true"
-31        android:extractNativeLibs="false"
+31        android:extractNativeLibs="true"
 32        android:icon="@drawable/ic_launcher_foreground"
 32-->/home/thusci/Documents/Dev/CAMRAW/app/src/main/AndroidManifest.xml:15:9-56
 33        android:label="@string/app_name"

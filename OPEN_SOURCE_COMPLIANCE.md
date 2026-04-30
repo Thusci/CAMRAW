@@ -1,10 +1,10 @@
 # Open Source Compliance
 
-CAMRAW will use source-built LGPL libraries for multi-brand USB tethering.
+CAMRAW uses source-built LGPL libraries for multi-brand USB tethering.
 
 ## Strategy
 
-- Build libusb and libgphoto2 from official source releases.
+- Build libtool/libltdl, libusb, and libgphoto2 from official source releases.
 - Package LGPL libraries as dynamically linked `.so` files where required.
 - Keep notices, source URLs, versions, and local build patches in the repository.
 - Do not ship unknown third-party prebuilt binaries.
@@ -12,12 +12,16 @@ CAMRAW will use source-built LGPL libraries for multi-brand USB tethering.
 
 ## Current State
 
-`providers/libgphoto` now builds `libcamraw_gphoto_bridge.so` with libusb 1.0.29 source compiled into the bridge for `arm64-v8a`.
+`providers/libgphoto` builds official source releases into dynamically linked Android `.so` libraries for `arm64-v8a`:
 
-The official libgphoto2 2.5.33 source tree is unpacked under `third_party/libgphoto2-2.5.33`, but the full libgphoto2/camlibs Android backend is not initialized yet. Until then, native operations that require libgphoto2 return structured `NATIVE_BACKEND_UNSUPPORTED` / `NATIVE_BACKEND_INIT_FAILED` errors and do not report fake success.
+- `libcamraw_ltdl.so` from GNU libtool/libltdl 2.4.7.
+- `libcamraw_libusb.so` from libusb 1.0.29.
+- `libcamraw_gphoto2_port.so` and `libcamraw_gphoto2.so` from libgphoto2 2.5.33.
+- `libcamraw_gphoto2_iolib_usb1.so` and `libcamraw_gphoto2_camlib_ptp2.so` as ltdl-loaded dynamic modules.
+
+Native USB access remains Android-permission gated. JNI duplicates the `UsbDeviceConnection.fileDescriptor`, passes only the duplicate to libgphoto2/libusb, and closes only the duplicate on native cleanup. Operations that cannot initialize or execute return structured native errors and do not report fake success.
 
 ## Required Before Real libgphoto Release
 
-- Complete libgphoto2 port/camlibs Android build against the fd-backed libusb bridge.
 - Document linker mode, patches, and reproducible build commands.
-- Ensure final APK packaging includes required LGPL dynamic libraries and notices if libgphoto2 is linked dynamically.
+- Ensure release packaging continues to include the LGPL dynamic libraries and notices.
