@@ -1,12 +1,22 @@
 package com.camraw.providers.fake
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Shader
 import com.camraw.core.camera.api.CameraCapabilities
 import com.camraw.core.camera.api.CameraCapability
+import com.camraw.core.camera.api.CameraCaptureRequest
 import com.camraw.core.camera.api.CameraConnectionType
 import com.camraw.core.camera.api.CameraDeviceInfo
 import com.camraw.core.camera.api.CameraDeviceProvider
+import com.camraw.core.camera.api.CameraError
+import com.camraw.core.camera.api.CameraErrorType
 import com.camraw.core.camera.api.CameraEvent
 import com.camraw.core.camera.api.CameraEventType
+import com.camraw.core.camera.api.CameraImportBrowser
 import com.camraw.core.camera.api.CameraObjectKind
 import com.camraw.core.camera.api.CameraSession
 import com.camraw.core.camera.api.CameraSettingDescriptor
@@ -34,8 +44,8 @@ import com.camraw.core.camera.api.SettingCategory
 import com.camraw.core.camera.api.SettingValue
 import com.camraw.core.camera.api.SettingValueType
 import com.camraw.core.camera.api.SettingWriteResult
-import com.camraw.core.camera.api.StoredCameraFile
-import com.camraw.core.camera.api.CameraCaptureRequest
+import com.camraw.core.camera.api.StorageWriteRequest
+import com.camraw.core.camera.api.TetherCaptureController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,11 +59,15 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.time.Instant
 import java.util.UUID
 import kotlin.math.sin
 
-class FakeCameraProvider : CameraDeviceProvider {
+class FakeCameraProvider(
+    private val storageController: CameraStorageController? = null,
+) : CameraDeviceProvider {
     override val providerId: String = "fake-camera"
     override val providerName: String = "Fake Camera"
     override val priority: Int = 10
@@ -78,7 +92,7 @@ class FakeCameraProvider : CameraDeviceProvider {
 
     override suspend fun connect(device: CameraDeviceInfo): CameraSession {
         connectionState.value = ConnectionState.Connecting
-        val session = FakeCameraSession(device)
+        val session = FakeCameraSession(device, storageController)
         connectionState.value = ConnectionState.Connected(session.sessionId)
         return session
     }
@@ -94,6 +108,7 @@ class FakeCameraProvider : CameraDeviceProvider {
 
 class FakeCameraSession(
     override val deviceInfo: CameraDeviceInfo,
+    override val storage: CameraStorageController?,
 ) : CameraSession {
     override val sessionId: String = UUID.randomUUID().toString()
     private val eventFlow = MutableSharedFlow<CameraEvent>(extraBufferCapacity = 32)
@@ -102,10 +117,11 @@ class FakeCameraSession(
     override val capabilities: StateFlow<CameraCapabilities> = capabilityFlow.asStateFlow()
     override val events: Flow<CameraEvent> = eventFlow.asSharedFlow()
     override val preview: PreviewController = FakePreviewController(eventFlow)
-    override val capture: CaptureController = FakeCaptureController(eventFlow)
+    override val capture: CaptureController = FakeCaptureController(eventFlow, deviceInfo, storage)
     override val settings: CameraSettingsController = FakeSettingsController(capabilityFlow.value.settings)
     override val focus: FocusController = FakeFocusController()
-    override val storage: CameraStorageController? = null
+    override val tether: TetherCaptureController? = null
+    override val importBrowser: CameraImportBrowser? = null
     override val metadata: MetadataController = MetadataController {
         mapOf("provider" to "fake-camera", "sessionId" to sessionId)
     }
@@ -165,6 +181,8 @@ private class FakePreviewController(
 
 private class FakeCaptureController(
     private val events: MutableSharedFlow<CameraEvent>,
+    private val deviceInfo: CameraDeviceInfo,
+    private val storage: CameraStorageController?,
 ) : CaptureController {
     private val state = MutableStateFlow<CaptureState>(CaptureState.Idle)
 
@@ -175,26 +193,121 @@ private class FakeCaptureController(
         events.tryEmit(CameraEvent(type = CameraEventType.CaptureStarted, message = "Fake capture started"))
         delay(180)
         state.value = CaptureState.Writing
-        delay(90)
-        val result = CaptureResult(
-            format = request.format,
-            files = listOf(
-                StoredCameraFile(
-                    uri = "memory://fake/${UUID.randomUUID()}.jpg",
-                    displayName = "Fake_${Instant.now().toEpochMilli()}.jpg",
-                    mimeType = "image/jpeg",
-                    kind = CameraObjectKind.Jpeg,
-                    bytes = 256L,
-                ),
-            ),
-            metadata = mapOf("simulated" to "true"),
+
+        val metadata = request.metadata + mapOf(
+            "simulated" to "true",
+            "provider" to deviceInfo.providerId,
+            "requestedFormat" to request.format.name,
         )
-        state.value = CaptureState.Completed(result)
-        events.tryEmit(CameraEvent(type = CameraEventType.CaptureCompleted, message = "Fake capture completed"))
+        val storageController = storage
+        val result = if (storageController == null) {
+            val error = CameraError(
+                type = CameraErrorType.StorageFailed,
+                userMessageZh = "虚拟相机没有可用的相册存储",
+                debugMessage = "FakeCameraProvider was created without a CameraStorageController",
+                fallbackSuggestionZh = "请使用应用内置入口启动虚拟相机，或切换到手机原生摄像头。",
+                causeCode = "FAKE_STORAGE_MISSING",
+            )
+            CaptureResult(format = request.format, files = emptyList(), metadata = metadata, error = error)
+        } else {
+            val capturedAt = Instant.now()
+            val bytes = createFakeJpeg(capturedAt)
+            val writeResult = storageController.write(
+                StorageWriteRequest(
+                    providerId = deviceInfo.providerId,
+                    providerName = deviceInfo.providerName,
+                    deviceId = deviceInfo.id,
+                    deviceName = deviceInfo.displayName,
+                    kind = CameraObjectKind.Jpeg,
+                    extension = "jpg",
+                    mimeType = "image/jpeg",
+                    capturedAt = capturedAt,
+                    metadata = metadata,
+                ),
+            ) { output -> output.write(bytes) }
+            val files = buildList {
+                writeResult.file?.let(::add)
+                writeResult.sidecar?.let(::add)
+            }
+            CaptureResult(
+                format = request.format,
+                files = files,
+                metadata = metadata,
+                error = if (writeResult.success && writeResult.file != null) null else writeResult.error ?: fakeStorageError(),
+            )
+        }
+
+        val error = result.error
+        if (error == null) {
+            state.value = CaptureState.Completed(result)
+            events.tryEmit(CameraEvent(type = CameraEventType.CaptureCompleted, message = "Fake capture completed"))
+        } else {
+            state.value = CaptureState.Failed(error)
+            events.tryEmit(CameraEvent(type = CameraEventType.Error, message = "Fake capture storage failed"))
+        }
         delay(250)
         state.value = CaptureState.Idle
         return result
     }
+}
+
+private suspend fun createFakeJpeg(capturedAt: Instant): ByteArray = withContext(Dispatchers.Default) {
+    val width = 1280
+    val height = 720
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    paint.shader = LinearGradient(
+        0f,
+        0f,
+        width.toFloat(),
+        height.toFloat(),
+        intArrayOf(Color.rgb(16, 22, 30), Color.rgb(20, 94, 112), Color.rgb(226, 236, 224)),
+        floatArrayOf(0f, 0.58f, 1f),
+        Shader.TileMode.CLAMP,
+    )
+    canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+
+    paint.shader = null
+    paint.color = Color.argb(180, 255, 255, 255)
+    paint.strokeWidth = 2f
+    for (x in width / 4 until width step width / 4) {
+        canvas.drawLine(x.toFloat(), 0f, x.toFloat(), height.toFloat(), paint)
+    }
+    for (y in height / 3 until height step height / 3) {
+        canvas.drawLine(0f, y.toFloat(), width.toFloat(), y.toFloat(), paint)
+    }
+
+    paint.style = Paint.Style.STROKE
+    paint.strokeWidth = 8f
+    paint.color = Color.argb(210, 185, 236, 255)
+    canvas.drawCircle(width / 2f, height / 2f, 96f, paint)
+    paint.style = Paint.Style.FILL
+    paint.textSize = 42f
+    paint.color = Color.WHITE
+    canvas.drawText("CAMRAW Virtual Capture", 56f, 92f, paint)
+    paint.textSize = 28f
+    paint.color = Color.argb(210, 255, 255, 255)
+    canvas.drawText(capturedAt.toString(), 56f, 136f, paint)
+
+    try {
+        ByteArrayOutputStream().use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 92, output)) { "Bitmap JPEG compression failed" }
+            output.toByteArray()
+        }
+    } finally {
+        bitmap.recycle()
+    }
+}
+
+private fun fakeStorageError(): CameraError {
+    return CameraError(
+        type = CameraErrorType.StorageFailed,
+        userMessageZh = "虚拟相机照片保存失败",
+        debugMessage = "CameraStorageController returned success=false without an error",
+        fallbackSuggestionZh = "请确认系统相册可写、存储空间充足后重试。",
+        causeCode = "FAKE_STORAGE_FAILED",
+    )
 }
 
 private class FakeSettingsController(
@@ -256,6 +369,7 @@ private fun fakeCapabilities(device: CameraDeviceInfo): CameraCapabilities {
         CameraCapability.FocusPeaking,
         CameraCapability.Histogram,
         CameraCapability.Grid,
+        CameraCapability.MediaStoreSave,
         CameraCapability.SidecarMetadata,
         CameraCapability.DebugDump,
     )

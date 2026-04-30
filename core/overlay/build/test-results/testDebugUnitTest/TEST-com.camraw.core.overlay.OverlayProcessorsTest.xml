@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.camraw.core.overlay.OverlayProcessorsTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-04-30T02:49:49.076Z" hostname="thusci-STYLISTIC" time="0.087">
+<testsuite name="com.camraw.core.overlay.OverlayProcessorsTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-04-30T08:37:47.948Z" hostname="thusci-STYLISTIC" time="0.157">
   <properties/>
-  <testcase name="histogramReportsHighlightClipping" classname="com.camraw.core.overlay.OverlayProcessorsTest" time="0.056"/>
+  <testcase name="histogramReportsHighlightClipping" classname="com.camraw.core.overlay.OverlayProcessorsTest" time="0.106"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

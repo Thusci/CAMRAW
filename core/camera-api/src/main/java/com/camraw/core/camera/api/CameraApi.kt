@@ -30,6 +30,8 @@ interface CameraSession {
     val focus: FocusController?
     val storage: CameraStorageController?
     val metadata: MetadataController?
+    val tether: TetherCaptureController?
+    val importBrowser: CameraImportBrowser?
 
     suspend fun refreshCapabilities(): CameraCapabilities
     suspend fun close()
@@ -52,6 +54,7 @@ data class CameraDeviceInfo(
 enum class CameraConnectionType {
     Internal,
     UsbPtp,
+    UsbGPhoto,
     UsbUvc,
     Virtual,
 }
@@ -125,6 +128,13 @@ enum class CameraCapability {
     MediaStoreSave,
     SidecarMetadata,
     DebugDump,
+    TetherCapture,
+    FileImport,
+    RawDownload,
+    JpegDownload,
+    CameraFileBrowser,
+    BodyShutterDetection,
+    BasicExternalSettingsControl,
 }
 
 data class CapabilityInfo(
@@ -408,6 +418,7 @@ enum class CameraObjectKind {
     Preview,
     Video,
     Sidecar,
+    Unknown,
 }
 
 data class CameraEvent(
@@ -426,6 +437,11 @@ enum class CameraEventType {
     PreviewStopped,
     CaptureStarted,
     CaptureCompleted,
+    DownloadStarted,
+    DownloadProgress,
+    DownloadCompleted,
+    TetherStarted,
+    TetherStopped,
     Error,
     Debug,
 }
@@ -463,6 +479,83 @@ fun unsupportedError(feature: String): CameraError {
         fallbackSuggestionZh = "请切换支持该能力的设备或关闭该控制项。",
     )
 }
+
+interface TetherCaptureController {
+    suspend fun startWatching(projectId: String, policy: TetherImportPolicy = TetherImportPolicy()): TetherSession
+    suspend fun stopWatching(sessionId: String)
+    fun observeIncomingObjects(sessionId: String): Flow<TetherIncomingObject>
+    fun observeDownloadQueue(sessionId: String): Flow<TetherDownloadQueueState>
+}
+
+data class TetherSession(
+    val sessionId: String = UUID.randomUUID().toString(),
+    val projectId: String,
+    val policy: TetherImportPolicy,
+    val startedAt: Instant = Instant.now(),
+)
+
+data class TetherImportPolicy(
+    val importRaw: Boolean = true,
+    val importJpeg: Boolean = true,
+    val preferJpegFirst: Boolean = true,
+    val pairRawAndJpeg: Boolean = true,
+    val createPreview: Boolean = true,
+    val addToProject: Boolean = true,
+    val deleteAfterImport: Boolean = false,
+    val maxRetryCount: Int = 3,
+)
+
+data class TetherIncomingObject(
+    val sessionId: String,
+    val cameraObject: CameraObject,
+    val pairingKey: String? = null,
+    val detectedAt: Instant = Instant.now(),
+    val sourceEvent: String = "ObjectAdded",
+)
+
+data class TetherDownloadQueueState(
+    val sessionId: String,
+    val running: Boolean,
+    val items: List<TetherDownloadItem>,
+    val updatedAt: Instant = Instant.now(),
+)
+
+data class TetherDownloadItem(
+    val itemId: String = UUID.randomUUID().toString(),
+    val cameraObject: CameraObject,
+    val status: TetherDownloadStatus,
+    val progress: Float = 0f,
+    val attempts: Int = 0,
+    val storedFile: StoredCameraFile? = null,
+    val error: CameraError? = null,
+)
+
+enum class TetherDownloadStatus {
+    Queued,
+    Downloading,
+    Downloaded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+interface CameraImportBrowser {
+    suspend fun listStorages(): List<CameraStorageVolume>
+    suspend fun listObjects(folder: String = "/"): List<CameraObject>
+    suspend fun downloadObject(
+        cameraObject: CameraObject,
+        request: StorageWriteRequest? = null,
+    ): StorageWriteResult
+}
+
+data class CameraStorageVolume(
+    val id: String,
+    val displayName: String,
+    val rootPath: String = "/",
+    val freeBytes: Long? = null,
+    val totalBytes: Long? = null,
+    val providerMetadata: Map<String, String> = emptyMap(),
+)
 
 internal fun String.escapeJson(): String {
     return buildString {

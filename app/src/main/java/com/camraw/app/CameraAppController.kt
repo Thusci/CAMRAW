@@ -14,8 +14,10 @@ import com.camraw.core.camera.api.CaptureResult
 import com.camraw.core.camera.runtime.CameraProviderRegistry
 import com.camraw.core.logging.CamrawLog
 import com.camraw.core.logging.LogCategory
+import com.camraw.core.storage.DefaultCameraStorageController
 import com.camraw.providers.fake.FakeCameraProvider
 import com.camraw.providers.internalcamera.AndroidInternalCameraProvider
+import com.camraw.providers.libgphoto.LibGPhotoProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,10 +31,13 @@ class CameraAppController(
 ) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val storageController = DefaultCameraStorageController(appContext)
+    private val libGPhotoProvider = LibGPhotoProvider(appContext, storageController)
     private val registry = CameraProviderRegistry(
         providers = listOf(
-            AndroidInternalCameraProvider(appContext),
-            FakeCameraProvider(),
+            AndroidInternalCameraProvider(appContext, storageController),
+            libGPhotoProvider,
+            FakeCameraProvider(storageController),
         ),
     )
 
@@ -124,6 +129,19 @@ class CameraAppController(
             _status.value = error.userMessageZh
             return
         }
+        if (device.connectionType == CameraConnectionType.UsbGPhoto && device.requiresPermission) {
+            val requested = libGPhotoProvider.requestPermission(device)
+            val error = CameraError(
+                type = CameraErrorType.PermissionError,
+                userMessageZh = if (requested) "已请求 USB 权限，请允许后重新点击设备" else "无法请求 USB 权限",
+                debugMessage = "UsbGPhoto requiresPermission=${device.requiresPermission} requested=$requested device=${device.debugInfo}",
+                fallbackSuggestionZh = "授权弹窗出现后请选择允许；如果没有弹窗，请重新插拔 USB 相机后刷新设备列表。",
+                causeCode = if (requested) "USB_PERMISSION_REQUESTED" else "USB_PERMISSION_REQUEST_FAILED",
+            )
+            _lastError.value = error
+            _status.value = error.userMessageZh
+            return
+        }
         _busy.value = true
         _status.value = "Connecting ${device.displayName}"
         runCatching { registry.connect(device) }
@@ -152,11 +170,23 @@ class CameraAppController(
         val result = capture.capture(CameraCaptureRequest(format = format))
         val error = result.error
         _lastCapture.value = result
-        _lastError.value = error
-        _status.value = if (error == null) {
-            "Saved ${result.files.count { it.kind.name != "Sidecar" }} file(s)"
+        val primaryFileCount = result.files.count { it.kind.name != "Sidecar" }
+        val effectiveError = error ?: if (primaryFileCount == 0) {
+            CameraError(
+                type = CameraErrorType.StorageFailed,
+                userMessageZh = "拍摄完成但没有文件保存到相册",
+                debugMessage = "Capture returned success without any non-sidecar StoredCameraFile. format=$format provider=${session.deviceInfo.providerId} device=${session.deviceInfo.id}",
+                fallbackSuggestionZh = "请切换为 JPEG 重试；如果仍失败，请把设备页底部诊断信息发给我。",
+                causeCode = "CAPTURE_RETURNED_NO_GALLERY_FILE",
+            )
         } else {
-            error.userMessageZh
+            null
+        }
+        _lastError.value = effectiveError
+        _status.value = if (effectiveError == null) {
+            "Saved $primaryFileCount file(s)"
+        } else {
+            effectiveError.userMessageZh
         }
         _busy.value = false
     }
@@ -166,6 +196,11 @@ class CameraAppController(
             registry.closeActiveSession()
             _status.value = "Disconnected"
         }
+    }
+
+    fun reportRuntimeError(error: CameraError) {
+        _lastError.value = error
+        _status.value = error.userMessageZh
     }
 
     private fun appError(messageZh: String, throwable: Throwable): CameraError {

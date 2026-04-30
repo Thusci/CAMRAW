@@ -42,10 +42,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.PhotoCamera
@@ -74,6 +76,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
@@ -92,14 +95,17 @@ import com.camraw.core.camera.api.CameraCapability
 import com.camraw.core.camera.api.CameraConnectionType
 import com.camraw.core.camera.api.CameraDeviceInfo
 import com.camraw.core.camera.api.CameraError
+import com.camraw.core.camera.api.CameraErrorType
 import com.camraw.core.camera.api.CameraSettingDescriptor
 import com.camraw.core.camera.api.CameraSession
 import com.camraw.core.camera.api.CapabilityState
 import com.camraw.core.camera.api.CaptureFormat
+import com.camraw.core.camera.api.CaptureResult
 import com.camraw.core.camera.api.CaptureState
 import com.camraw.core.camera.api.FocusPoint
 import com.camraw.core.camera.api.PreviewSurface
 import com.camraw.core.camera.api.SettingValue
+import com.camraw.core.camera.api.TetherImportPolicy
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -115,6 +121,7 @@ fun CamrawApp(
     val busy by controller.busy.collectAsStateWithLifecycle()
     val status by controller.status.collectAsStateWithLifecycle()
     val error by controller.lastError.collectAsStateWithLifecycle()
+    val lastCapture by controller.lastCapture.collectAsStateWithLifecycle()
 
     Box(
         modifier = Modifier
@@ -125,6 +132,8 @@ fun CamrawApp(
             DevicePickerScreen(
                 devices = devices,
                 status = status,
+                error = error,
+                lastCapture = lastCapture,
                 hasCameraPermission = hasCameraPermission,
                 onRequestCameraPermission = onRequestCameraPermission,
                 onConnect = controller::connectAsync,
@@ -137,6 +146,7 @@ fun CamrawApp(
                 error = error,
                 onCapture = { format -> controller.captureAsync(format) },
                 onRequestCameraPermission = onRequestCameraPermission,
+                onPreviewError = controller::reportRuntimeError,
                 onDisconnect = controller::closeSessionAsync,
             )
         }
@@ -147,6 +157,8 @@ fun CamrawApp(
 private fun DevicePickerScreen(
     devices: List<CameraDeviceInfo>,
     status: String,
+    error: CameraError?,
+    lastCapture: CaptureResult?,
     hasCameraPermission: Boolean,
     onRequestCameraPermission: () -> Unit,
     onConnect: (CameraDeviceInfo) -> Unit,
@@ -192,6 +204,78 @@ private fun DevicePickerScreen(
                     )
                 }
             }
+            DevicePickerDebugPanel(
+                devices = devices,
+                status = status,
+                error = error,
+                lastCapture = lastCapture,
+                hasCameraPermission = hasCameraPermission,
+                backdrop = backdrop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(218.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DevicePickerDebugPanel(
+    devices: List<CameraDeviceInfo>,
+    status: String,
+    error: CameraError?,
+    lastCapture: CaptureResult?,
+    hasCameraPermission: Boolean,
+    backdrop: PreviewBackdrop,
+    modifier: Modifier = Modifier,
+) {
+    val debugText = remember(devices, status, error, lastCapture, hasCameraPermission) {
+        buildDevicePickerDebugText(
+            devices = devices,
+            status = status,
+            error = error,
+            lastCapture = lastCapture,
+            hasCameraPermission = hasCameraPermission,
+        )
+    }
+    LiquidGlassSurface(
+        modifier = modifier,
+        backdrop = backdrop,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+        blurRadius = 20.dp,
+        tonalOpacity = 0.34f,
+        materialOpacity = 0.72f,
+        contentPadding = PaddingValues(12.dp),
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Rounded.BugReport,
+                    contentDescription = null,
+                    tint = Color(0xFFB9ECFF),
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "反馈诊断信息",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            SelectionContainer {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    item {
+                        Text(
+                            text = debugText,
+                            color = Color.White.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -204,7 +288,8 @@ private fun DeviceRow(
     onRequestCameraPermission: () -> Unit,
     onConnect: (CameraDeviceInfo) -> Unit,
 ) {
-    val needsPermission = device.requiresPermission && !permissionReady
+    val needsCameraPermission = device.connectionType == CameraConnectionType.Internal && device.requiresPermission && !permissionReady
+    val needsUsbPermission = device.connectionType == CameraConnectionType.UsbGPhoto && device.requiresPermission
     LiquidGlassSurface(
         modifier = Modifier
             .fillMaxWidth()
@@ -212,7 +297,7 @@ private fun DeviceRow(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
             ) {
-                if (needsPermission) onRequestCameraPermission() else onConnect(device)
+                if (needsCameraPermission) onRequestCameraPermission() else onConnect(device)
             },
         backdrop = backdrop,
         contentPadding = PaddingValues(18.dp),
@@ -246,7 +331,11 @@ private fun DeviceRow(
                 )
             }
             Text(
-                text = if (needsPermission) "Grant" else "Open",
+                text = when {
+                    needsCameraPermission -> "Grant"
+                    needsUsbPermission -> "USB"
+                    else -> "Open"
+                },
                 style = MaterialTheme.typography.labelLarge,
                 color = Color(0xFFB9ECFF),
             )
@@ -262,15 +351,17 @@ private fun CameraScreen(
     error: CameraError?,
     onCapture: (CaptureFormat) -> Unit,
     onRequestCameraPermission: () -> Unit,
+    onPreviewError: (CameraError) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     var backdrop by remember { mutableStateOf(PreviewBackdrop()) }
     var showSettings by remember { mutableStateOf(false) }
     var showDebug by remember { mutableStateOf(false) }
+    var showTether by remember { mutableStateOf(false) }
     var showGrid by remember { mutableStateOf(true) }
     var showHistogram by remember { mutableStateOf(false) }
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
-    val panelOpen = showSettings || showDebug
+    val panelOpen = showSettings || showDebug || showTether
     val scope = rememberCoroutineScope()
     val captureState = session.capture?.captureState?.collectAsStateWithLifecycle()?.value ?: CaptureState.Idle
     val previewState = session.preview?.previewState?.collectAsStateWithLifecycle()?.value
@@ -283,6 +374,10 @@ private fun CameraScreen(
         if (selectedFormat !in supportedFormats) {
             selectedFormat = supportedFormats.firstOrNull() ?: CaptureFormat.Jpeg
         }
+    }
+
+    LaunchedEffect(previewState.error) {
+        previewState.error?.let(onPreviewError)
     }
 
     LaunchedEffect(session.sessionId) {
@@ -312,7 +407,11 @@ private fun CameraScreen(
                 }
             },
     ) {
-        CameraPreviewHost(session = session, modifier = Modifier.fillMaxSize())
+        CameraPreviewHost(
+            session = session,
+            onPreviewError = onPreviewError,
+            modifier = Modifier.fillMaxSize(),
+        )
         if (session.deviceInfo.connectionType == CameraConnectionType.Virtual) {
             FakeSensorAnimation(Modifier.fillMaxSize(), quiet = false)
         }
@@ -337,6 +436,8 @@ private fun CameraScreen(
                 onToggleGrid = { showGrid = !showGrid },
                 onToggleHistogram = { showHistogram = !showHistogram },
                 onSettings = { showSettings = true },
+                onTether = { showTether = true },
+                hasTether = session.tether != null || session.importBrowser != null,
                 onDebug = { showDebug = true },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
@@ -377,6 +478,7 @@ private fun CameraScreen(
             onDismiss = {
                 showSettings = false
                 showDebug = false
+                showTether = false
             },
         )
         SettingsPanel(
@@ -391,6 +493,13 @@ private fun CameraScreen(
             session = session,
             backdrop = backdrop,
             onClose = { showDebug = false },
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
+        TetherPanel(
+            visible = showTether,
+            session = session,
+            backdrop = backdrop,
+            onClose = { showTether = false },
             modifier = Modifier.align(Alignment.BottomCenter),
         )
     }
@@ -470,6 +579,8 @@ private fun RightToolbar(
     onToggleGrid: () -> Unit,
     onToggleHistogram: () -> Unit,
     onSettings: () -> Unit,
+    onTether: () -> Unit,
+    hasTether: Boolean,
     onDebug: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -479,6 +590,9 @@ private fun RightToolbar(
     ) {
         GlassControl(Icons.Rounded.GridOn, "Grid", selected = showGrid, backdrop = backdrop, onClick = onToggleGrid)
         GlassControl(Icons.Rounded.GraphicEq, "Histogram", selected = showHistogram, backdrop = backdrop, onClick = onToggleHistogram)
+        if (hasTether) {
+            GlassControl(Icons.Rounded.CloudDownload, "Tether", backdrop = backdrop, onClick = onTether)
+        }
         GlassControl(Icons.Rounded.Tune, "Settings", backdrop = backdrop, onClick = onSettings)
         GlassControl(Icons.Rounded.BugReport, "Debug", backdrop = backdrop, onClick = onDebug)
     }
@@ -924,6 +1038,64 @@ private val ProSettingOrder = listOf("iso", "shutter", "ev", "wb")
 private const val CameraPreviewBufferWidth = 1280
 private const val CameraPreviewBufferHeight = 720
 
+private fun buildDevicePickerDebugText(
+    devices: List<CameraDeviceInfo>,
+    status: String,
+    error: CameraError?,
+    lastCapture: CaptureResult?,
+    hasCameraPermission: Boolean,
+): String {
+    return buildString {
+        appendLine("CAMRAW_DEVICE_DEBUG")
+        appendLine("status=$status")
+        appendLine("cameraPermission=$hasCameraPermission")
+        appendLine("deviceCount=${devices.size}")
+        appendLine()
+        if (error == null) {
+            appendLine("lastError=none")
+        } else {
+            appendLine("lastError.type=${error.type.name}")
+            appendLine("lastError.user=${error.userMessageZh}")
+            appendLine("lastError.causeCode=${error.causeCode ?: "none"}")
+            appendLine("lastError.recoverable=${error.recoverable}")
+            appendLine("lastError.suggestion=${error.fallbackSuggestionZh ?: "none"}")
+            appendLine("lastError.debug=")
+            appendLine(error.debugMessage.trim().ifEmpty { "empty" })
+        }
+        appendLine()
+        if (lastCapture == null) {
+            appendLine("lastCapture=none")
+        } else {
+            appendLine("lastCapture.jobId=${lastCapture.jobId}")
+            appendLine("lastCapture.format=${lastCapture.format.name}")
+            appendLine("lastCapture.fileCount=${lastCapture.files.size}")
+            lastCapture.files.forEachIndexed { index, file ->
+                appendLine("lastCapture.file[$index].kind=${file.kind}")
+                appendLine("lastCapture.file[$index].name=${file.displayName}")
+                appendLine("lastCapture.file[$index].mime=${file.mimeType}")
+                appendLine("lastCapture.file[$index].bytes=${file.bytes ?: "unknown"}")
+                appendLine("lastCapture.file[$index].uri=${file.uri}")
+                appendLine("lastCapture.file[$index].sha256=${file.checksumSha256 ?: "none"}")
+            }
+            appendLine("lastCapture.metadata=${lastCapture.metadata.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }.ifBlank { "none" }}")
+        }
+        appendLine()
+        appendLine("devices:")
+        devices.forEachIndexed { index, device ->
+            appendLine("[$index] ${device.displayName}")
+            appendLine("  id=${device.id}")
+            appendLine("  provider=${device.providerId}/${device.providerName}")
+            appendLine("  type=${device.connectionType}")
+            appendLine("  model=${device.model ?: "unknown"}")
+            appendLine("  manufacturer=${device.manufacturer ?: "unknown"}")
+            appendLine("  requiresPermission=${device.requiresPermission}")
+            appendLine("  capabilities=${device.capabilitySummary.joinToString("|").ifBlank { "none" }}")
+            appendLine("  setupHint=${device.setupHint ?: "none"}")
+            appendLine("  debug=${device.debugInfo.toSortedMap().entries.joinToString(",") { "${it.key}=${it.value}" }.ifBlank { "none" }}")
+        }
+    }.trimEnd()
+}
+
 private fun CameraCapabilities.supportedCaptureFormats(): List<CaptureFormat> {
     return buildList {
         if (isSupported(CameraCapability.CaptureJpeg)) add(CaptureFormat.Jpeg)
@@ -972,6 +1144,153 @@ private fun SettingValue?.sameValueAs(other: SettingValue): Boolean {
 
 private fun SettingValue.isAuto(): Boolean {
     return debugValue.equals("auto", ignoreCase = true) || label.equals("auto", ignoreCase = true)
+}
+
+@Composable
+private fun TetherPanel(
+    visible: Boolean,
+    session: CameraSession,
+    backdrop: PreviewBackdrop,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var tetherSessionId by remember(session.sessionId) { mutableStateOf<String?>(null) }
+    var panelStatus by remember(session.sessionId) { mutableStateOf("待机") }
+    val queueState = remember(tetherSessionId) {
+        session.tether?.observeDownloadQueue(tetherSessionId ?: "idle")
+    }?.collectAsStateWithLifecycle(
+        initialValue = com.camraw.core.camera.api.TetherDownloadQueueState(
+            sessionId = tetherSessionId ?: "idle",
+            running = false,
+            items = emptyList(),
+        ),
+    )?.value
+
+    GlassBottomSheet(visible = visible, backdrop = backdrop, modifier = modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .navigationBarsPadding()
+                .fillMaxHeight(0.58f),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "联机拍摄",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                GlassControl(Icons.Rounded.Close, "Close", backdrop = backdrop, onClick = onClose)
+            }
+            Spacer(Modifier.height(14.dp))
+            TetherInfoRow("设备", "${session.deviceInfo.displayName} / ${session.deviceInfo.providerName}")
+            TetherInfoRow("项目", "Default_${session.sessionId.take(8)}")
+            TetherInfoRow("状态", panelStatus)
+            TetherInfoRow("导入队列", "${queueState?.items?.size ?: 0} 个任务")
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TetherActionPill(
+                    label = if (queueState?.running == true) "停止监听" else "开始监听",
+                    backdrop = backdrop,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val tether = session.tether ?: return@TetherActionPill
+                    scope.launch {
+                        if (queueState?.running == true && tetherSessionId != null) {
+                            tether.stopWatching(tetherSessionId!!)
+                            panelStatus = "已停止监听"
+                            tetherSessionId = null
+                        } else {
+                            val tetherSession = tether.startWatching(
+                                projectId = "Default_${session.sessionId.take(8)}",
+                                policy = TetherImportPolicy(deleteAfterImport = false),
+                            )
+                            tetherSessionId = tetherSession.sessionId
+                            panelStatus = "监听中：JPG 优先，RAW 后台下载，不删除相机卡文件"
+                        }
+                    }
+                }
+                TetherActionPill(
+                    label = "读取文件",
+                    backdrop = backdrop,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val browser = session.importBrowser ?: return@TetherActionPill
+                    scope.launch {
+                        runCatching { browser.listObjects("/") }
+                            .onSuccess { files ->
+                                panelStatus = "相机文件：${files.size} 个"
+                            }
+                            .onFailure { throwable ->
+                                panelStatus = "读取失败：${throwable.message?.take(80) ?: throwable::class.java.simpleName}"
+                            }
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = "Native: ${session.deviceInfo.debugInfo["nativeBackend"] ?: "unknown"}",
+                color = Color.White.copy(alpha = 0.68f),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TetherInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = 0.58f),
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.width(76.dp),
+        )
+        Text(
+            text = value,
+            color = Color.White.copy(alpha = 0.86f),
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun TetherActionPill(
+    label: String,
+    backdrop: PreviewBackdrop,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    LiquidGlassSurface(
+        modifier = modifier.clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = onClick,
+        ),
+        backdrop = backdrop,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+        materialOpacity = 0.70f,
+        tonalOpacity = 0.36f,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Text(
+            text = label,
+            color = Color(0xFFB9ECFF),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 @Composable
@@ -1032,11 +1351,22 @@ private fun ErrorBanner(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.Warning, contentDescription = null, tint = Color(0xFFFFD089))
                 Spacer(Modifier.width(10.dp))
-                Text(
-                    text = error?.userMessageZh.orEmpty(),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = error?.userMessageZh.orEmpty(),
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    error?.let {
+                        Text(
+                            text = "${it.type.name}${it.causeCode?.let { code -> " / $code" }.orEmpty()}",
+                            color = Color.White.copy(alpha = 0.62f),
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
         }
     }
@@ -1059,16 +1389,36 @@ private fun HistogramPill(backdrop: PreviewBackdrop, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun CameraPreviewHost(session: CameraSession, modifier: Modifier = Modifier) {
+private fun CameraPreviewHost(
+    session: CameraSession,
+    onPreviewError: (CameraError) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val scope = rememberCoroutineScope()
     if (session.deviceInfo.connectionType == CameraConnectionType.Virtual) {
         LaunchedEffect(session.sessionId) {
-            session.preview?.bind(PreviewSurface(Any(), 1, 1, 0))
+            runCatching {
+                session.preview?.bind(PreviewSurface(Any(), 1, 1, 0))
+            }.onFailure { throwable ->
+                onPreviewError(previewHostError("虚拟相机预览启动失败", throwable, "VIRTUAL_PREVIEW_BIND_FAILED"))
+            }
         }
         DisposableEffect(session.sessionId) {
-            onDispose { scope.launch { session.preview?.unbind() } }
+            onDispose {
+                scope.launch {
+                    runCatching { session.preview?.unbind() }
+                }
+            }
         }
         return
+    }
+
+    DisposableEffect(session.sessionId) {
+        onDispose {
+            scope.launch {
+                runCatching { session.preview?.unbind() }
+            }
+        }
     }
 
     AndroidView(
@@ -1079,51 +1429,90 @@ private fun CameraPreviewHost(session: CameraSession, modifier: Modifier = Modif
                     private var surface: Surface? = null
 
                     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-                        texture.setDefaultBufferSize(
-                            CameraPreviewBufferWidth,
-                            CameraPreviewBufferHeight,
-                        )
-                        surface = Surface(texture)
-                        scope.launch {
-                            runCatching {
-                                session.preview?.bind(
-                                    PreviewSurface(
-                                        nativeSurface = surface ?: return@runCatching,
-                                        width = CameraPreviewBufferWidth,
-                                        height = CameraPreviewBufferHeight,
-                                        rotationDegrees = when (display?.rotation) {
-                                            Surface.ROTATION_90 -> 90
-                                            Surface.ROTATION_180 -> 180
-                                            Surface.ROTATION_270 -> 270
-                                            else -> 0
-                                        },
-                                    ),
-                                )
+                        runCatching {
+                            texture.setDefaultBufferSize(
+                                CameraPreviewBufferWidth,
+                                CameraPreviewBufferHeight,
+                            )
+                            surface = Surface(texture)
+                            scope.launch {
+                                runCatching {
+                                    session.preview?.bind(
+                                        PreviewSurface(
+                                            nativeSurface = surface ?: return@runCatching,
+                                            width = CameraPreviewBufferWidth,
+                                            height = CameraPreviewBufferHeight,
+                                            rotationDegrees = when (display?.rotation) {
+                                                Surface.ROTATION_90 -> 90
+                                                Surface.ROTATION_180 -> 180
+                                                Surface.ROTATION_270 -> 270
+                                                else -> 0
+                                            },
+                                        ),
+                                    )
+                                }.onFailure { throwable ->
+                                    onPreviewError(
+                                        previewHostError(
+                                            messageZh = "手机原生摄像头预览启动失败",
+                                            throwable = throwable,
+                                            causeCode = "TEXTURE_PREVIEW_BIND_FAILED",
+                                        ),
+                                    )
+                                }
                             }
+                        }.onFailure { throwable ->
+                            onPreviewError(
+                                previewHostError(
+                                    messageZh = "预览画面初始化失败",
+                                    throwable = throwable,
+                                    causeCode = "TEXTURE_SURFACE_INIT_FAILED",
+                                )
+                            )
                         }
                     }
 
                     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
-                        texture.setDefaultBufferSize(
-                            CameraPreviewBufferWidth,
-                            CameraPreviewBufferHeight,
-                        )
+                        runCatching {
+                            texture.setDefaultBufferSize(
+                                CameraPreviewBufferWidth,
+                                CameraPreviewBufferHeight,
+                            )
+                        }.onFailure { throwable ->
+                            onPreviewError(
+                                previewHostError(
+                                    messageZh = "预览画面尺寸更新失败",
+                                    throwable = throwable,
+                                    causeCode = "TEXTURE_SIZE_UPDATE_FAILED",
+                                ),
+                            )
+                        }
                     }
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
                         val oldSurface = surface
                         surface = null
                         scope.launch {
-                            session.preview?.unbind()
-                            oldSurface?.release()
+                            runCatching { session.preview?.unbind() }
+                            runCatching { oldSurface?.release() }
+                            runCatching { texture.release() }
                         }
-                        return true
+                        return false
                     }
 
                     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
                 }
             }
         },
+    )
+}
+
+private fun previewHostError(messageZh: String, throwable: Throwable, causeCode: String): CameraError {
+    return CameraError(
+        type = CameraErrorType.PreviewFailed,
+        userMessageZh = messageZh,
+        debugMessage = throwable.stackTraceToString(),
+        fallbackSuggestionZh = "预览异常已被拦截，App 不应再闪退；请切回设备页复制底部诊断信息。",
+        causeCode = causeCode,
     )
 }
 

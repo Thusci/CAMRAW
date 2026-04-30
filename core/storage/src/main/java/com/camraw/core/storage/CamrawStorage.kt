@@ -46,12 +46,20 @@ class DefaultCameraStorageController(
         }
 
         val resolver = context.contentResolver
-        val uri = resolver.insert(collection, values)
-            ?: return@withContext StorageWriteResult(
+        val uri = try {
+            resolver.insert(collection, values)
+        } catch (throwable: Throwable) {
+            return@withContext StorageWriteResult(
                 file = null,
                 sidecar = null,
                 success = false,
-                error = storageError("MediaStore insert returned null for $displayName"),
+                error = storageError("MediaStore insert threw for $displayName\n${throwable.stackTraceToString()}", "MEDIASTORE_INSERT_FAILED"),
+            )
+        } ?: return@withContext StorageWriteResult(
+                file = null,
+                sidecar = null,
+                success = false,
+                error = storageError("MediaStore insert returned null for $displayName", "MEDIASTORE_INSERT_NULL"),
             )
 
         var byteCount = 0L
@@ -62,6 +70,7 @@ class DefaultCameraStorageController(
                 writer(counting)
                 counting.flush()
             } ?: error("Unable to open output stream for $uri")
+            check(byteCount > 0L) { "Storage writer produced an empty file for $displayName" }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 resolver.update(
@@ -89,7 +98,7 @@ class DefaultCameraStorageController(
                 file = null,
                 sidecar = null,
                 success = false,
-                error = storageError(throwable.stackTraceToString()),
+                error = storageError(throwable.stackTraceToString(), "MEDIASTORE_WRITE_FAILED"),
             )
         }
     }
@@ -99,37 +108,46 @@ class DefaultCameraStorageController(
         stored: StoredCameraFile,
         originalRelativePath: String,
     ): StoredCameraFile? {
-        val sidecarName = stored.displayName.substringBeforeLast('.') + ".json"
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, sidecarName)
-            put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, originalRelativePath)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
-            }
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values) ?: return null
         return try {
-            val json = buildSidecarJson(request, stored)
-            resolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                resolver.update(
-                    uri,
-                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                    null,
-                    null,
-                )
+            val sidecarName = stored.displayName.substringBeforeLast('.') + ".json"
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, sidecarName)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, originalRelativePath)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
             }
-            StoredCameraFile(
-                uri = uri.toString(),
-                displayName = sidecarName,
-                mimeType = "application/json",
-                kind = CameraObjectKind.Sidecar,
-                bytes = json.toByteArray(Charsets.UTF_8).size.toLong(),
-            )
+            val resolver = context.contentResolver
+            val uri = try {
+                resolver.insert(MediaStore.Files.getContentUri("external"), values)
+            } catch (_: Throwable) {
+                null
+            } ?: return null
+
+            try {
+                val json = buildSidecarJson(request, stored)
+                resolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    resolver.update(
+                        uri,
+                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                        null,
+                        null,
+                    )
+                }
+                StoredCameraFile(
+                    uri = uri.toString(),
+                    displayName = sidecarName,
+                    mimeType = "application/json",
+                    kind = CameraObjectKind.Sidecar,
+                    bytes = json.toByteArray(Charsets.UTF_8).size.toLong(),
+                )
+            } catch (_: Throwable) {
+                resolver.delete(uri, null, null)
+                null
+            }
         } catch (_: Throwable) {
-            resolver.delete(uri, null, null)
             null
         }
     }
@@ -173,7 +191,8 @@ private fun StorageWriteRequest.collectionUri(): Uri {
         CameraObjectKind.Raw,
         CameraObjectKind.Heic,
         CameraObjectKind.Jpeg,
-        CameraObjectKind.Preview -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        CameraObjectKind.Preview,
+        CameraObjectKind.Unknown -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
     }
 }
 
@@ -186,8 +205,9 @@ private fun StorageWriteRequest.relativePath(rootDirectoryName: String): String 
         CameraObjectKind.Preview -> "PREVIEW"
         CameraObjectKind.Video -> "VIDEO"
         CameraObjectKind.Sidecar -> "SIDECAR"
+        CameraObjectKind.Unknown -> "IMPORT"
     }
-    return "Pictures/$rootDirectoryName/$date/${deviceName.cleanFilePart()}/$type"
+    return "Pictures/$rootDirectoryName/$date/${deviceName.cleanFilePart()}/$type/"
 }
 
 private fun String.cleanFilePart(): String {
@@ -198,12 +218,13 @@ private fun String.cleanFilePart(): String {
         .take(48)
 }
 
-private fun storageError(debug: String): CameraError {
+private fun storageError(debug: String, causeCode: String): CameraError {
     return CameraError(
         type = CameraErrorType.StorageFailed,
         userMessageZh = "文件保存失败",
         debugMessage = debug,
         fallbackSuggestionZh = "请确认系统相册可写、存储空间充足后重试。",
+        causeCode = causeCode,
     )
 }
 

@@ -31,8 +31,39 @@
 - [x] 修复液态玻璃 UI 过度透明导致交互控件重叠：玻璃材质加入更明确的深色承载层，参数/Debug 面板打开时隐藏快门和侧边工具栏，并加入背景遮罩防止视觉穿透和误触。
 - [x] 增加保存格式选择：底部拍摄栏按当前 `CameraCapabilities` 显示 JPEG / HEIC / RAW / JPEG+RAW；Camera2 通过系统 stream map 检测 HEIC/RAW 支持，MediaStore 按 JPEG/HEIC/RAW 分目录保存。
 - [x] 保存格式切换以预览优先：Camera2 session 会从 RAW/分析/HEIC/JPEG 逐级降级到 preview-only；如果所选格式在当前降级 session 中不可用，会返回结构化中文错误并保持预览运行。
+- [x] 在设备切换页底部加入可复制诊断信息：权限状态、设备列表、Camera2 debugInfo、最近错误类型/中文文案/底层堆栈/恢复建议；预览失败也会同步为最近错误，便于真机反馈。
+- [x] 修复保存链路：Sidecar JSON 写入失败不再回滚主照片；Camera2 对 JPEG/HEIC/RAW/DNG 主文件保存失败返回 `StorageFailed`；Fake Provider 也通过统一 MediaStore 管线生成真实 JPEG 保存到系统相册。
+- [x] 根据真机诊断修复内置相机连接空引用：`AndroidInternalSettingsController` 不再在 `CameraSession.capabilities` 初始化前读取 StateFlow，避免 Camera2 session 构造阶段崩溃。
+- [x] 修复真实相机调用闪退风险：预览绑定、TextureView Surface 初始化/尺寸更新、Camera2 unbind/stopRepeating 全部改为结构化错误上报，不再向 UI 协程抛出未捕获异常。
+- [x] 针对“真实相机只出一帧后闪退”加固 Camera2 管线：所有 ImageReader acquire 都捕获异常并确保 Image close；切换/销毁时执行 stopRepeating + abortCaptures + close；加入 generation token 丢弃旧回调；TextureView destroyed 改为相机 unbind 后手动释放 SurfaceTexture。
 - [ ] 真机手动验收仍待执行：权限流程、内置相机实际预览、JPEG 保存、RAW/DNG 保存、触控对焦效果、UI 流畅度。
 - [ ] Sony PTP、UVC、Native/libusb 未进入本轮实现，仍按后续 Milestone 推进。
+
+---
+
+# 2026-04-30 Codex 执行记录：libgphoto Native 技术栈整合
+
+- [x] 新增模块：`core:tether`、`core:import`、`core:project`、`core:metadata`、`providers:libgphoto`。
+- [x] 扩展统一 Camera API：加入 `UsbGPhoto` 连接类型，以及 `TetherCapture`、`FileImport`、`RawDownload`、`JpegDownload`、`CameraFileBrowser`、`BodyShutterDetection`、`BasicExternalSettingsControl` 等能力项。
+- [x] `CameraSession` 增加可空 `tether` 与 `importBrowser` 控制器；Fake/Internal Provider 保持兼容并默认返回空控制器。
+- [x] 新增 `TetherCaptureController`、`TetherSession`、`TetherImportPolicy`、`TetherIncomingObject`、`TetherDownloadQueueState`、`CameraImportBrowser`、`CameraStorageVolume` 等公共模型。
+- [x] 新增 RAW/JPG 配对策略与单元测试，支持 `.ARW/.CR2/.CR3/.NEF/.RAF/.RW2/.ORF/.DNG` 与 JPG 基于 basename 和拍摄时间窗口配对。
+- [x] 新增最小 Import/Project/Metadata 数据层：导入批次规划、内存 Project Repository、Sidecar metadata builder。
+- [x] 新增 `providers:libgphoto`：Android USB 设备发现、still-image/vendor-specific 初筛、USB 权限状态、权限请求、`UsbDeviceConnection.fileDescriptor` 获取、fd 传入 JNI。
+- [x] 新增 arm64-v8a Native CMake 目标 `libcamraw_gphoto_bridge.so`，native 内部 `dup(fd)` 接管生命周期，close 时释放 owned fd。
+- [x] 新增 JNI API：`openFromFd`、`close`、`getDeviceInfo`、`getCapabilities`、`getConfigJson`、`setConfigValue`、`capture`、`waitForEvent`、`listFiles`、`downloadFile`、`cancelOperation` 的 Kotlin wrapper 与错误映射。
+- [x] 当前 native backend 为 `libusb-fd-bridge`：官方 libusb 1.0.29 源码已编入 Android native bridge；libgphoto2/camlibs 尚未初始化时继续返回结构化 unsupported/init failed 错误，不返回假成功。
+- [x] App 接入 `LibGPhotoProvider`，设备页可显示 USB/libgphoto 设备、权限状态、native backend、vendor/product/debug 信息。
+- [x] 拍摄页新增最小“联机拍摄”面板：项目名、监听启停、读取文件入口、下载队列状态、native backend 摘要。
+- [x] 新增合规文档：`third_party/SOURCES.md`、`third_party_licenses/README.md`、`NOTICE`、`OPEN_SOURCE_COMPLIANCE.md`。
+- [x] 通过 `./gradlew testDebugUnitTest :providers:libgphoto:assembleDebug :app:assembleDebug`。
+- [x] APK 已确认包含 `lib/arm64-v8a/libcamraw_gphoto_bridge.so`。
+- [x] 从 `third_party_src/` 解压官方源码包到 `third_party/libusb-1.0.29` 与 `third_party/libgphoto2-2.5.33`，并校验 SHA-256。
+- [x] CMake 接入 libusb Android 源码构建，`libcamraw_gphoto_bridge.so` 通过 `libusb_init` + `libusb_wrap_sys_device` 使用 Android 授权后的 fd，不扫描 `/dev/bus/usb`。
+- [x] Native bridge 继续兼容原 Kotlin/JNI API；`capture/listFiles/download/waitForEvent/config` 在 libgphoto2 backend 未完成前返回 `NATIVE_BACKEND_UNSUPPORTED`，错误中包含 backend、版本、fd、libusb init/wrap 状态。
+- [x] APK 重新确认包含 arm64-v8a `libcamraw_gphoto_bridge.so`，尺寸从 stub 约 67KB 增至约 223KB。
+- [ ] 下一步完成 libgphoto2 port/camlibs Android 后端，让 `list/capture/download` 进入真实 libgphoto2 流程。
+- [ ] 真实外接相机手动验收仍待执行：USB 权限弹窗、fd bridge open、识别型号、list files、下载、机身快门 ObjectAdded、断线重连。
 
 构建环境备注：
 

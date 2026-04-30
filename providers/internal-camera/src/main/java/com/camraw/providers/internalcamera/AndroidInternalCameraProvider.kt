@@ -32,6 +32,7 @@ import com.camraw.core.camera.api.CameraError
 import com.camraw.core.camera.api.CameraErrorType
 import com.camraw.core.camera.api.CameraEvent
 import com.camraw.core.camera.api.CameraEventType
+import com.camraw.core.camera.api.CameraImportBrowser
 import com.camraw.core.camera.api.CameraObjectKind
 import com.camraw.core.camera.api.CameraSession
 import com.camraw.core.camera.api.CameraSettingDescriptor
@@ -61,6 +62,7 @@ import com.camraw.core.camera.api.SettingValueType
 import com.camraw.core.camera.api.SettingWriteResult
 import com.camraw.core.camera.api.StorageWriteRequest
 import com.camraw.core.camera.api.StoredCameraFile
+import com.camraw.core.camera.api.TetherCaptureController
 import com.camraw.core.camera.api.unsupportedError
 import com.camraw.core.storage.DefaultCameraStorageController
 import kotlinx.coroutines.CompletableDeferred
@@ -82,6 +84,7 @@ import kotlinx.coroutines.withTimeout
 import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
@@ -212,11 +215,12 @@ private class AndroidInternalCameraSession(
     private var nextJpegImage: CompletableDeferred<Image>? = null
     private var nextHeicImage: CompletableDeferred<Image>? = null
     private var nextRawImage: CompletableDeferred<Image>? = null
+    private val cameraGeneration = AtomicLong(0L)
 
     private val requestState = MutableRequestState(characteristics)
     private val previewController = AndroidInternalPreviewController(this)
     private val captureController = AndroidInternalCaptureController(this)
-    private val settingsController = AndroidInternalSettingsController(this)
+    private val settingsController = AndroidInternalSettingsController(this, capabilityFlow.value.settings)
     private val focusController = AndroidInternalFocusController(this)
 
     override val capabilities: StateFlow<CameraCapabilities> = capabilityFlow.asStateFlow()
@@ -225,6 +229,8 @@ private class AndroidInternalCameraSession(
     override val capture: CaptureController = captureController
     override val settings: CameraSettingsController = settingsController
     override val focus: FocusController = focusController
+    override val tether: TetherCaptureController? = null
+    override val importBrowser: CameraImportBrowser? = null
     override val metadata: MetadataController = MetadataController {
         mapOf(
             "providerId" to deviceInfo.providerId,
@@ -242,29 +248,26 @@ private class AndroidInternalCameraSession(
     }
 
     override suspend fun close() {
-        runCatching { previewController.unbind() }
-        captureSession?.close()
-        captureSession = null
-        cameraDevice?.close()
-        cameraDevice = null
-        closeReaders()
+        cameraGeneration.incrementAndGet()
+        closeCameraPipeline(closeDevice = true, reason = "Session closed")
+        previewController.setState(PreviewState(running = false))
         thread.quitSafely()
         eventFlow.tryEmit(CameraEvent(type = CameraEventType.Disconnected, message = "Internal camera closed"))
     }
 
     suspend fun bindPreview(surface: Surface, width: Int, height: Int) {
+        val generation = cameraGeneration.incrementAndGet()
         ensureCameraOpen()
         previewSurface = surface
-        configureSession(width, height)
+        configureSession(width, height, generation)
+        if (!isCurrentGeneration(generation)) return
         updateRepeating()
         eventFlow.tryEmit(CameraEvent(type = CameraEventType.PreviewStarted, message = "Internal preview started"))
     }
 
     suspend fun unbindPreview() {
-        captureSession?.stopRepeating()
-        captureSession?.close()
-        captureSession = null
-        previewSurface = null
+        cameraGeneration.incrementAndGet()
+        closeCameraPipeline(closeDevice = false, reason = "Preview unbound")
         previewController.setState(PreviewState(running = false))
         eventFlow.tryEmit(CameraEvent(type = CameraEventType.PreviewStopped, message = "Internal preview stopped"))
     }
@@ -278,6 +281,9 @@ private class AndroidInternalCameraSession(
         val wantsJpeg = request.format == CaptureFormat.Jpeg || request.format == CaptureFormat.RawAndJpeg
         val wantsHeic = request.format == CaptureFormat.Heic
         val wantsRaw = request.format == CaptureFormat.Raw || request.format == CaptureFormat.RawAndJpeg
+        if (!wantsJpeg && !wantsHeic && !wantsRaw) {
+            return formatUnavailable(request.format, "No still ImageReader target for ${request.format}")
+        }
         if (wantsJpeg && jpegReader == null) {
             return formatUnavailable(request.format, "JPEG ImageReader is not available in the active capture session")
         }
@@ -330,6 +336,9 @@ private class AndroidInternalCameraSession(
             val totalResult = withTimeout(CameraOperationTimeoutMs) { resultDeferred.await() }
             captureController.setState(CaptureState.Writing)
             val files = mutableListOf<StoredCameraFile>()
+            val writeErrors = mutableListOf<CameraError>()
+            val capturedAt = Instant.now()
+            val captureMetadata = request.metadata + currentCaptureMetadata() + mapOf("requestedFormat" to request.format.name)
             jpegDeferred?.let { withTimeout(CameraOperationTimeoutMs) { it.await() } }?.use { image ->
                 val bytes = image.planes.first().buffer.readBytes()
                 val writeResult = storage.write(
@@ -341,12 +350,15 @@ private class AndroidInternalCameraSession(
                         kind = CameraObjectKind.Jpeg,
                         extension = "jpg",
                         mimeType = "image/jpeg",
-                        capturedAt = Instant.now(),
-                        metadata = request.metadata + currentCaptureMetadata(),
+                        capturedAt = capturedAt,
+                        metadata = captureMetadata,
                     ),
                 ) { output -> output.write(bytes) }
                 writeResult.file?.let(files::add)
                 writeResult.sidecar?.let(files::add)
+                if (!writeResult.success || writeResult.file == null) {
+                    writeErrors += writeResult.error ?: storageMissingError("JPEG")
+                }
             }
             heicDeferred?.let { withTimeout(CameraOperationTimeoutMs) { it.await() } }?.use { image ->
                 val bytes = image.planes.first().buffer.readBytes()
@@ -359,12 +371,15 @@ private class AndroidInternalCameraSession(
                         kind = CameraObjectKind.Heic,
                         extension = "heic",
                         mimeType = "image/heic",
-                        capturedAt = Instant.now(),
-                        metadata = request.metadata + currentCaptureMetadata(),
+                        capturedAt = capturedAt,
+                        metadata = captureMetadata,
                     ),
                 ) { output -> output.write(bytes) }
                 writeResult.file?.let(files::add)
                 writeResult.sidecar?.let(files::add)
+                if (!writeResult.success || writeResult.file == null) {
+                    writeErrors += writeResult.error ?: storageMissingError("HEIC")
+                }
             }
             rawDeferred?.let { withTimeout(CameraOperationTimeoutMs) { it.await() } }?.use { image ->
                 val writeResult = storage.write(
@@ -376,8 +391,8 @@ private class AndroidInternalCameraSession(
                         kind = CameraObjectKind.Raw,
                         extension = "dng",
                         mimeType = "image/x-adobe-dng",
-                        capturedAt = Instant.now(),
-                        metadata = request.metadata + currentCaptureMetadata(),
+                        capturedAt = capturedAt,
+                        metadata = captureMetadata,
                     ),
                 ) { output ->
                     val creator = DngCreator(characteristics, totalResult)
@@ -389,14 +404,26 @@ private class AndroidInternalCameraSession(
                 }
                 writeResult.file?.let(files::add)
                 writeResult.sidecar?.let(files::add)
+                if (!writeResult.success || writeResult.file == null) {
+                    writeErrors += writeResult.error ?: storageMissingError("RAW/DNG")
+                }
+            }
+            val storageError = writeErrors.takeIf { it.isNotEmpty() }?.let {
+                aggregateStorageError(request.format, it)
             }
             val captureResult = CaptureResult(
                 format = request.format,
                 files = files,
-                metadata = currentCaptureMetadata(),
+                metadata = captureMetadata,
+                error = storageError,
             )
-            captureController.setState(CaptureState.Completed(captureResult))
-            eventFlow.tryEmit(CameraEvent(type = CameraEventType.CaptureCompleted, message = "Internal capture completed"))
+            if (storageError == null) {
+                captureController.setState(CaptureState.Completed(captureResult))
+                eventFlow.tryEmit(CameraEvent(type = CameraEventType.CaptureCompleted, message = "Internal capture completed"))
+            } else {
+                captureController.setState(CaptureState.Failed(storageError))
+                eventFlow.tryEmit(CameraEvent(type = CameraEventType.Error, message = "Internal capture storage failed"))
+            }
             captureController.setState(CaptureState.Idle)
             captureResult
         }.getOrElse { throwable ->
@@ -537,18 +564,18 @@ private class AndroidInternalCameraSession(
         }
     }
 
-    private suspend fun configureSession(width: Int, height: Int) {
+    private suspend fun configureSession(width: Int, height: Int, generation: Long) {
         val device = cameraDevice ?: return
         val surface = previewSurface ?: return
-        captureSession?.close()
-        captureSession = null
-        closeReaders()
-        createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = true, enableAnalysis = true)
+        closeCameraPipeline(closeDevice = false, reason = "Reconfiguring preview session")
+        previewSurface = surface
+        if (!isCurrentGeneration(generation)) return
+        createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = true, enableAnalysis = true, generation = generation)
         captureSession = runCatching {
             createCameraSession(device, sessionSurfaces(surface))
         }.recoverCatching { firstFailure ->
             closeRawReader()
-            createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = false, enableAnalysis = true)
+            createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = false, enableAnalysis = true, generation = generation)
             createCameraSession(device, sessionSurfaces(surface)).also {
                 eventFlow.tryEmit(
                     CameraEvent(
@@ -560,7 +587,7 @@ private class AndroidInternalCameraSession(
             }
         }.recoverCatching { secondFailure ->
             closeAnalysisReader()
-            createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = false, enableAnalysis = false)
+            createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = false, enableAnalysis = false, generation = generation)
             createCameraSession(device, sessionSurfaces(surface)).also {
                 eventFlow.tryEmit(
                     CameraEvent(
@@ -572,7 +599,7 @@ private class AndroidInternalCameraSession(
             }
         }.recoverCatching { thirdFailure ->
             closeHeicReader()
-            createReaders(width, height, enableJpeg = true, enableHeic = false, enableRaw = false, enableAnalysis = false)
+            createReaders(width, height, enableJpeg = true, enableHeic = false, enableRaw = false, enableAnalysis = false, generation = generation)
             createCameraSession(device, sessionSurfaces(surface)).also {
                 eventFlow.tryEmit(
                     CameraEvent(
@@ -584,7 +611,7 @@ private class AndroidInternalCameraSession(
             }
         }.recoverCatching { fourthFailure ->
             closeReaders()
-            createReaders(width, height, enableJpeg = false, enableHeic = false, enableRaw = false, enableAnalysis = false)
+            createReaders(width, height, enableJpeg = false, enableHeic = false, enableRaw = false, enableAnalysis = false, generation = generation)
             createCameraSession(device, sessionSurfaces(surface)).also {
                 eventFlow.tryEmit(
                     CameraEvent(
@@ -652,6 +679,7 @@ private class AndroidInternalCameraSession(
         enableHeic: Boolean,
         enableRaw: Boolean,
         enableAnalysis: Boolean,
+        generation: Long,
     ) {
         val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         val jpegSize = streamMap?.getOutputSizes(ImageFormat.JPEG)?.bestStillSize()
@@ -664,72 +692,155 @@ private class AndroidInternalCameraSession(
         if (enableJpeg && jpegReader == null) {
             jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2).apply {
                 setOnImageAvailableListener({ reader ->
-                    val image = reader.acquireNextImage()
+                    val image = acquireNextImageSafely(reader, "JPEG") ?: return@setOnImageAvailableListener
+                    if (!isCurrentGeneration(generation)) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
                     val target = nextJpegImage
                     nextJpegImage = null
-                    if (target != null) target.complete(image) else image.close()
+                    if (target?.complete(image) != true) image.close()
                 }, handler)
             }
         }
         if (enableHeic && heicReader == null && capabilityFlow.value.isSupported(CameraCapability.CaptureHeic) && heicSize != null) {
             heicReader = ImageReader.newInstance(heicSize.width, heicSize.height, ImageFormat.HEIC, 2).apply {
                 setOnImageAvailableListener({ reader ->
-                    val image = reader.acquireNextImage()
+                    val image = acquireNextImageSafely(reader, "HEIC") ?: return@setOnImageAvailableListener
+                    if (!isCurrentGeneration(generation)) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
                     val target = nextHeicImage
                     nextHeicImage = null
-                    if (target != null) target.complete(image) else image.close()
+                    if (target?.complete(image) != true) image.close()
                 }, handler)
             }
         }
         if (enableRaw && rawReader == null && capabilityFlow.value.isSupported(CameraCapability.CaptureRaw) && rawSize != null) {
             rawReader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, 2).apply {
                 setOnImageAvailableListener({ reader ->
-                    val image = reader.acquireNextImage()
+                    val image = acquireNextImageSafely(reader, "RAW") ?: return@setOnImageAvailableListener
+                    if (!isCurrentGeneration(generation)) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
                     val target = nextRawImage
                     nextRawImage = null
-                    if (target != null) target.complete(image) else image.close()
+                    if (target?.complete(image) != true) image.close()
                 }, handler)
             }
         }
         if (enableAnalysis && analysisReader == null) {
             analysisReader = ImageReader.newInstance(yuvSize.width, yuvSize.height, ImageFormat.YUV_420_888, 3).apply {
                 setOnImageAvailableListener({ reader ->
-                    reader.acquireLatestImage()?.use { image ->
+                    val image = acquireLatestImageSafely(reader, "YUV_ANALYSIS") ?: return@setOnImageAvailableListener
+                    if (!isCurrentGeneration(generation)) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
+                    try {
                         val luminance = image.averageLuminance()
+                        val frameWidth = image.width
+                        val frameHeight = image.height
                         scope.launch {
-                            previewController.emitFrame(
-                                PreviewFrame(
-                                    id = System.nanoTime(),
-                                    timestamp = Instant.now(),
-                                    width = image.width,
-                                    height = image.height,
-                                    luminance = luminance,
-                                ),
-                            )
+                            if (isCurrentGeneration(generation)) {
+                                previewController.emitFrame(
+                                    PreviewFrame(
+                                        id = System.nanoTime(),
+                                        timestamp = Instant.now(),
+                                        width = frameWidth,
+                                        height = frameHeight,
+                                        luminance = luminance,
+                                    ),
+                                )
+                            }
                         }
+                    } catch (throwable: Throwable) {
+                        reportPreviewPipelineError("YUV analysis processing failed", throwable, "YUV_ANALYSIS_PROCESS_FAILED")
+                    } finally {
+                        image.close()
                     }
                 }, handler)
             }
         }
     }
 
+    private fun isCurrentGeneration(generation: Long): Boolean {
+        return cameraGeneration.get() == generation
+    }
+
+    private fun closeCameraPipeline(closeDevice: Boolean, reason: String) {
+        cancelPendingImages(reason)
+        runCatching { captureSession?.stopRepeating() }
+        runCatching { captureSession?.abortCaptures() }
+        runCatching { captureSession?.close() }
+        captureSession = null
+        previewSurface = null
+        closeReaders()
+        if (closeDevice) {
+            runCatching { cameraDevice?.close() }
+            cameraDevice = null
+        }
+    }
+
+    private fun cancelPendingImages(reason: String) {
+        val error = IllegalStateException(reason)
+        nextJpegImage?.completeExceptionally(error)
+        nextHeicImage?.completeExceptionally(error)
+        nextRawImage?.completeExceptionally(error)
+        nextJpegImage = null
+        nextHeicImage = null
+        nextRawImage = null
+    }
+
+    private fun acquireNextImageSafely(reader: ImageReader, label: String): Image? {
+        return try {
+            reader.acquireNextImage()
+        } catch (throwable: Throwable) {
+            reportPreviewPipelineError("$label ImageReader acquireNextImage failed", throwable, "${label}_ACQUIRE_NEXT_FAILED")
+            null
+        }
+    }
+
+    private fun acquireLatestImageSafely(reader: ImageReader, label: String): Image? {
+        return try {
+            reader.acquireLatestImage()
+        } catch (throwable: Throwable) {
+            reportPreviewPipelineError("$label ImageReader acquireLatestImage failed", throwable, "${label}_ACQUIRE_LATEST_FAILED")
+            null
+        }
+    }
+
+    private fun reportPreviewPipelineError(message: String, throwable: Throwable, causeCode: String) {
+        val error = CameraError(
+            type = CameraErrorType.PreviewFailed,
+            userMessageZh = "手机原生摄像头预览管线异常",
+            debugMessage = "$message\n${throwable.stackTraceToString()}",
+            fallbackSuggestionZh = "已拦截该异常并关闭当前预览管线；请切回设备页复制底部诊断信息。",
+            causeCode = causeCode,
+        )
+        previewController.setState(PreviewState(running = false, error = error))
+        eventFlow.tryEmit(CameraEvent(type = CameraEventType.Error, message = message))
+    }
+
     private fun closeJpegReader() {
-        jpegReader?.close()
+        runCatching { jpegReader?.close() }
         jpegReader = null
     }
 
     private fun closeHeicReader() {
-        heicReader?.close()
+        runCatching { heicReader?.close() }
         heicReader = null
     }
 
     private fun closeRawReader() {
-        rawReader?.close()
+        runCatching { rawReader?.close() }
         rawReader = null
     }
 
     private fun closeAnalysisReader() {
-        analysisReader?.close()
+        runCatching { analysisReader?.close() }
         analysisReader = null
     }
 
@@ -759,6 +870,34 @@ private class AndroidInternalCameraSession(
         )
         return CaptureResult(format = format, files = emptyList(), error = error)
     }
+
+    private fun storageMissingError(label: String): CameraError {
+        return CameraError(
+            type = CameraErrorType.StorageFailed,
+            userMessageZh = "$label 文件保存失败",
+            debugMessage = "CameraStorageController returned success=false or null primary file for $label",
+            fallbackSuggestionZh = "请确认系统相册可写、存储空间充足后重试。",
+            causeCode = "CAMERA2_STORAGE_PRIMARY_MISSING",
+        )
+    }
+
+    private fun aggregateStorageError(format: CaptureFormat, errors: List<CameraError>): CameraError {
+        val first = errors.first()
+        return CameraError(
+            type = CameraErrorType.StorageFailed,
+            userMessageZh = "${format.userLabel()} 保存到相册失败",
+            debugMessage = buildString {
+                appendLine("Capture storage failed for format=${format.name}, device=${deviceInfo.id}")
+                errors.forEachIndexed { index, error ->
+                    appendLine("[$index] type=${error.type} causeCode=${error.causeCode.orEmpty()}")
+                    appendLine(error.debugMessage)
+                }
+            },
+            fallbackSuggestionZh = first.fallbackSuggestionZh ?: "请确认系统相册可写、存储空间充足后重试。",
+            causeCode = first.causeCode ?: "CAMERA2_STORAGE_FAILED",
+            recoverable = errors.all { it.recoverable },
+        )
+    }
 }
 
 private class AndroidInternalPreviewController(
@@ -772,7 +911,17 @@ private class AndroidInternalPreviewController(
 
     override suspend fun bind(surface: PreviewSurface) {
         val native = surface.nativeSurface as? Surface
-            ?: throw IllegalArgumentException("Internal camera requires android.view.Surface")
+            ?: run {
+                val error = CameraError(
+                    type = CameraErrorType.PreviewFailed,
+                    userMessageZh = "手机原生摄像头预览启动失败",
+                    debugMessage = "Internal camera requires android.view.Surface, got ${surface.nativeSurface::class.java.name}",
+                    fallbackSuggestionZh = "请返回设备页重新进入相机。",
+                    causeCode = "INTERNAL_PREVIEW_SURFACE_TYPE",
+                )
+                state.value = PreviewState(running = false, error = error)
+                return
+            }
         runCatching {
             session.bindPreview(native, surface.width, surface.height)
         }.onFailure { throwable ->
@@ -783,13 +932,14 @@ private class AndroidInternalPreviewController(
                     userMessageZh = "手机原生摄像头预览启动失败",
                     debugMessage = throwable.stackTraceToString(),
                     fallbackSuggestionZh = "请确认相机权限已授予，且没有其他应用正在占用摄像头。",
+                    causeCode = "INTERNAL_PREVIEW_BIND_FAILED",
                 ),
             )
-        }.getOrThrow()
+        }
     }
 
     override suspend fun unbind() {
-        session.unbindPreview()
+        runCatching { session.unbindPreview() }
     }
 
     fun setState(newState: PreviewState) {
@@ -819,14 +969,11 @@ private class AndroidInternalCaptureController(
 
 private class AndroidInternalSettingsController(
     private val session: AndroidInternalCameraSession,
+    initialSettings: List<CameraSettingDescriptor>,
 ) : CameraSettingsController {
-    private val state = MutableStateFlow<List<CameraSettingDescriptor>>(emptyList())
+    private val state = MutableStateFlow(initialSettings)
 
     override val settings: StateFlow<List<CameraSettingDescriptor>> = state.asStateFlow()
-
-    init {
-        state.value = session.capabilities.value.settings
-    }
 
     override suspend fun refreshSettings(): List<CameraSettingDescriptor> {
         return session.refreshSettings()

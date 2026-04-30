@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.camraw.core.storage.CameraFileNameGeneratorTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-04-30T02:49:55.161Z" hostname="thusci-STYLISTIC" time="0.341">
+<testsuite name="com.camraw.core.storage.CameraFileNameGeneratorTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-04-30T08:39:25.927Z" hostname="thusci-STYLISTIC" time="0.239">
   <properties/>
-  <testcase name="generatedNameContainsProviderDeviceTimestampAndSequence" classname="com.camraw.core.storage.CameraFileNameGeneratorTest" time="0.283"/>
+  <testcase name="generatedNameContainsProviderDeviceTimestampAndSequence" classname="com.camraw.core.storage.CameraFileNameGeneratorTest" time="0.186"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>
