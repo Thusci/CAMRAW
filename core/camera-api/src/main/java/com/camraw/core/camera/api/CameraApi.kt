@@ -106,6 +106,7 @@ enum class CameraCapability {
     Preview,
     PreviewFrameAnalysis,
     CaptureJpeg,
+    CaptureHeic,
     CaptureRaw,
     CaptureRawJpeg,
     ManualIso,
@@ -274,6 +275,7 @@ data class CameraCaptureRequest(
 
 enum class CaptureFormat {
     Jpeg,
+    Heic,
     Raw,
     RawAndJpeg,
     PreviewJpeg,
@@ -402,6 +404,7 @@ data class CameraObject(
 enum class CameraObjectKind {
     Raw,
     Jpeg,
+    Heic,
     Preview,
     Video,
     Sidecar,

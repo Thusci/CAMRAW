@@ -78,6 +78,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.nio.ByteBuffer
 import java.time.Instant
 import java.util.UUID
@@ -110,6 +111,12 @@ class AndroidInternalCameraProvider(
                     CameraCharacteristics.LENS_FACING_EXTERNAL -> "External"
                     else -> "Camera"
                 }
+                val facingKey = when (lensFacing) {
+                    CameraCharacteristics.LENS_FACING_BACK -> "back"
+                    CameraCharacteristics.LENS_FACING_EXTERNAL -> "external"
+                    CameraCharacteristics.LENS_FACING_FRONT -> "front"
+                    else -> "unknown"
+                }
                 val caps = buildCapabilities(providerId, cameraId, characteristics)
                 CameraDeviceInfo(
                     id = cameraId,
@@ -128,11 +135,21 @@ class AndroidInternalCameraProvider(
                         .map { it.name },
                     debugInfo = mapOf(
                         "cameraId" to cameraId,
+                        "lensFacing" to facingKey,
                         "hardwareLevel" to hardwareLevelName(characteristics),
                     ),
                 )
             }.getOrNull()
-        }
+        }.sortedWith(
+            compareBy<CameraDeviceInfo> {
+                when (it.debugInfo["lensFacing"]) {
+                    "back" -> 0
+                    "external" -> 1
+                    "front" -> 2
+                    else -> 3
+                }
+            }.thenBy { it.id },
+        )
         devices.value = discovered
         discovered.forEach { device ->
             connectionStates.getOrPut(device.id) { MutableStateFlow(ConnectionState.Disconnected) }
@@ -189,9 +206,11 @@ private class AndroidInternalCameraSession(
     private var captureSession: CameraCaptureSession? = null
     private var previewSurface: Surface? = null
     private var jpegReader: ImageReader? = null
+    private var heicReader: ImageReader? = null
     private var rawReader: ImageReader? = null
     private var analysisReader: ImageReader? = null
     private var nextJpegImage: CompletableDeferred<Image>? = null
+    private var nextHeicImage: CompletableDeferred<Image>? = null
     private var nextRawImage: CompletableDeferred<Image>? = null
 
     private val requestState = MutableRequestState(characteristics)
@@ -228,9 +247,7 @@ private class AndroidInternalCameraSession(
         captureSession = null
         cameraDevice?.close()
         cameraDevice = null
-        jpegReader?.close()
-        rawReader?.close()
-        analysisReader?.close()
+        closeReaders()
         thread.quitSafely()
         eventFlow.tryEmit(CameraEvent(type = CameraEventType.Disconnected, message = "Internal camera closed"))
     }
@@ -259,27 +276,29 @@ private class AndroidInternalCameraSession(
             ?: return captureFailure(request.format, "CameraDevice is not open")
 
         val wantsJpeg = request.format == CaptureFormat.Jpeg || request.format == CaptureFormat.RawAndJpeg
+        val wantsHeic = request.format == CaptureFormat.Heic
         val wantsRaw = request.format == CaptureFormat.Raw || request.format == CaptureFormat.RawAndJpeg
         if (wantsJpeg && jpegReader == null) {
-            return captureFailure(request.format, "JPEG ImageReader is not available in the active capture session")
+            return formatUnavailable(request.format, "JPEG ImageReader is not available in the active capture session")
+        }
+        if (wantsHeic && heicReader == null) {
+            return formatUnavailable(request.format, "HEIC ImageReader is not available in the active capture session")
         }
         if (wantsRaw && rawReader == null) {
-            return CaptureResult(
-                format = request.format,
-                files = emptyList(),
-                error = unsupportedError("RAW/DNG"),
-            )
+            return formatUnavailable(request.format, "RAW ImageReader is not available in the active capture session")
         }
 
         captureController.setState(CaptureState.Capturing)
         eventFlow.tryEmit(CameraEvent(type = CameraEventType.CaptureStarted, message = "Internal capture started"))
 
         val jpegDeferred = if (wantsJpeg) CompletableDeferred<Image>().also { nextJpegImage = it } else null
+        val heicDeferred = if (wantsHeic) CompletableDeferred<Image>().also { nextHeicImage = it } else null
         val rawDeferred = if (wantsRaw) CompletableDeferred<Image>().also { nextRawImage = it } else null
         val resultDeferred = CompletableDeferred<TotalCaptureResult>()
 
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             jpegReader?.surface?.takeIf { wantsJpeg }?.let { addTarget(it) }
+            heicReader?.surface?.takeIf { wantsHeic }?.let { addTarget(it) }
             rawReader?.surface?.takeIf { wantsRaw }?.let { addTarget(it) }
             applyRequestState(this)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
@@ -308,10 +327,10 @@ private class AndroidInternalCameraSession(
         )
 
         return runCatching {
-            val totalResult = resultDeferred.await()
+            val totalResult = withTimeout(CameraOperationTimeoutMs) { resultDeferred.await() }
             captureController.setState(CaptureState.Writing)
             val files = mutableListOf<StoredCameraFile>()
-            jpegDeferred?.await()?.use { image ->
+            jpegDeferred?.let { withTimeout(CameraOperationTimeoutMs) { it.await() } }?.use { image ->
                 val bytes = image.planes.first().buffer.readBytes()
                 val writeResult = storage.write(
                     StorageWriteRequest(
@@ -329,7 +348,25 @@ private class AndroidInternalCameraSession(
                 writeResult.file?.let(files::add)
                 writeResult.sidecar?.let(files::add)
             }
-            rawDeferred?.await()?.use { image ->
+            heicDeferred?.let { withTimeout(CameraOperationTimeoutMs) { it.await() } }?.use { image ->
+                val bytes = image.planes.first().buffer.readBytes()
+                val writeResult = storage.write(
+                    StorageWriteRequest(
+                        providerId = deviceInfo.providerId,
+                        providerName = deviceInfo.providerName,
+                        deviceId = deviceInfo.id,
+                        deviceName = deviceInfo.displayName,
+                        kind = CameraObjectKind.Heic,
+                        extension = "heic",
+                        mimeType = "image/heic",
+                        capturedAt = Instant.now(),
+                        metadata = request.metadata + currentCaptureMetadata(),
+                    ),
+                ) { output -> output.write(bytes) }
+                writeResult.file?.let(files::add)
+                writeResult.sidecar?.let(files::add)
+            }
+            rawDeferred?.let { withTimeout(CameraOperationTimeoutMs) { it.await() } }?.use { image ->
                 val writeResult = storage.write(
                     StorageWriteRequest(
                         providerId = deviceInfo.providerId,
@@ -363,6 +400,9 @@ private class AndroidInternalCameraSession(
             captureController.setState(CaptureState.Idle)
             captureResult
         }.getOrElse { throwable ->
+            nextJpegImage = null
+            nextHeicImage = null
+            nextRawImage = null
             val error = CameraError(
                 type = CameraErrorType.CaptureFailed,
                 userMessageZh = "拍摄失败",
@@ -461,17 +501,23 @@ private class AndroidInternalCameraSession(
         if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             throw SecurityException("CAMERA permission is required")
         }
-        return suspendCancellableCoroutine { continuation ->
+        return withTimeout(CameraOperationTimeoutMs) {
+            suspendCancellableCoroutine { continuation ->
             cameraManager.openCamera(
                 deviceInfo.id,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
-                        cameraDevice = camera
-                        continuation.resume(camera)
+                        if (continuation.isActive) {
+                            cameraDevice = camera
+                            continuation.resume(camera)
+                        } else {
+                            camera.close()
+                        }
                     }
 
                     override fun onDisconnected(camera: CameraDevice) {
                         camera.close()
+                        cameraDevice = null
                         if (continuation.isActive) {
                             continuation.resumeWithException(IllegalStateException("Camera disconnected"))
                         }
@@ -479,6 +525,7 @@ private class AndroidInternalCameraSession(
 
                     override fun onError(camera: CameraDevice, error: Int) {
                         camera.close()
+                        cameraDevice = null
                         if (continuation.isActive) {
                             continuation.resumeWithException(RuntimeException("Camera error $error"))
                         }
@@ -486,6 +533,7 @@ private class AndroidInternalCameraSession(
                 },
                 handler,
             )
+            }
         }
     }
 
@@ -494,12 +542,13 @@ private class AndroidInternalCameraSession(
         val surface = previewSurface ?: return
         captureSession?.close()
         captureSession = null
-        createReaders(width, height, enableRaw = true, enableAnalysis = true)
+        closeReaders()
+        createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = true, enableAnalysis = true)
         captureSession = runCatching {
             createCameraSession(device, sessionSurfaces(surface))
         }.recoverCatching { firstFailure ->
             closeRawReader()
-            createReaders(width, height, enableRaw = false, enableAnalysis = true)
+            createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = false, enableAnalysis = true)
             createCameraSession(device, sessionSurfaces(surface)).also {
                 eventFlow.tryEmit(
                     CameraEvent(
@@ -511,13 +560,37 @@ private class AndroidInternalCameraSession(
             }
         }.recoverCatching { secondFailure ->
             closeAnalysisReader()
-            createReaders(width, height, enableRaw = false, enableAnalysis = false)
+            createReaders(width, height, enableJpeg = true, enableHeic = true, enableRaw = false, enableAnalysis = false)
             createCameraSession(device, sessionSurfaces(surface)).also {
                 eventFlow.tryEmit(
                     CameraEvent(
                         type = CameraEventType.Debug,
                         message = "Preview session degraded: analysis surface disabled",
                         metadata = mapOf("reason" to secondFailure.message.orEmpty()),
+                    ),
+                )
+            }
+        }.recoverCatching { thirdFailure ->
+            closeHeicReader()
+            createReaders(width, height, enableJpeg = true, enableHeic = false, enableRaw = false, enableAnalysis = false)
+            createCameraSession(device, sessionSurfaces(surface)).also {
+                eventFlow.tryEmit(
+                    CameraEvent(
+                        type = CameraEventType.Debug,
+                        message = "Preview session degraded: HEIC surface disabled",
+                        metadata = mapOf("reason" to thirdFailure.message.orEmpty()),
+                    ),
+                )
+            }
+        }.recoverCatching { fourthFailure ->
+            closeReaders()
+            createReaders(width, height, enableJpeg = false, enableHeic = false, enableRaw = false, enableAnalysis = false)
+            createCameraSession(device, sessionSurfaces(surface)).also {
+                eventFlow.tryEmit(
+                    CameraEvent(
+                        type = CameraEventType.Debug,
+                        message = "Preview session degraded: capture and analysis surfaces disabled",
+                        metadata = mapOf("reason" to fourthFailure.message.orEmpty()),
                     ),
                 )
             }
@@ -529,50 +602,81 @@ private class AndroidInternalCameraSession(
     private suspend fun createCameraSession(
         device: CameraDevice,
         surfaces: List<Surface>,
-    ): CameraCaptureSession = suspendCancellableCoroutine { continuation ->
-        device.createCaptureSession(
-            surfaces,
-            object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(session: CameraCaptureSession) {
-                    if (continuation.isActive) continuation.resume(session)
-                }
+    ): CameraCaptureSession = withTimeout(CameraOperationTimeoutMs) {
+        suspendCancellableCoroutine { continuation ->
+            try {
+                device.createCaptureSession(
+                    surfaces,
+                    object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            if (continuation.isActive) {
+                                continuation.resume(session)
+                            } else {
+                                session.close()
+                            }
+                        }
 
-                override fun onConfigureFailed(session: CameraCaptureSession) {
-                    session.close()
-                    if (continuation.isActive) {
-                        continuation.resumeWithException(
-                            RuntimeException("Camera session configure failed for ${surfaces.size} surfaces"),
-                        )
-                    }
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            session.close()
+                            if (continuation.isActive) {
+                                continuation.resumeWithException(
+                                    RuntimeException("Camera session configure failed for ${surfaces.size} surfaces"),
+                                )
+                            }
+                        }
+                    },
+                    handler,
+                )
+            } catch (throwable: Throwable) {
+                if (continuation.isActive) {
+                    continuation.resumeWithException(throwable)
                 }
-            },
-            handler,
-        )
+            }
+        }
     }
 
     private fun sessionSurfaces(preview: Surface): List<Surface> {
         return buildList {
             add(preview)
             jpegReader?.surface?.let(::add)
+            heicReader?.surface?.let(::add)
             rawReader?.surface?.let(::add)
             analysisReader?.surface?.let(::add)
         }
     }
 
-    private fun createReaders(width: Int, height: Int, enableRaw: Boolean, enableAnalysis: Boolean) {
+    private fun createReaders(
+        width: Int,
+        height: Int,
+        enableJpeg: Boolean,
+        enableHeic: Boolean,
+        enableRaw: Boolean,
+        enableAnalysis: Boolean,
+    ) {
         val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val jpegSize = streamMap?.getOutputSizes(ImageFormat.JPEG)?.largest()
+        val jpegSize = streamMap?.getOutputSizes(ImageFormat.JPEG)?.bestStillSize()
             ?: Size(max(1, width), max(1, height))
-        val rawSize = streamMap?.getOutputSizes(ImageFormat.RAW_SENSOR)?.largest()
+        val heicSize = streamMap?.getOutputSizes(ImageFormat.HEIC)?.bestStillSize()
+        val rawSize = streamMap?.getOutputSizes(ImageFormat.RAW_SENSOR)?.takeIf { it.isNotEmpty() }?.largest()
         val yuvSize = streamMap?.getOutputSizes(ImageFormat.YUV_420_888)?.closestTo(Size(320, 180))
             ?: Size(320, 180)
 
-        if (jpegReader == null) {
+        if (enableJpeg && jpegReader == null) {
             jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2).apply {
                 setOnImageAvailableListener({ reader ->
                     val image = reader.acquireNextImage()
                     val target = nextJpegImage
                     nextJpegImage = null
+                    if (target != null) target.complete(image) else image.close()
+                }, handler)
+            }
+        }
+        if (enableHeic && heicReader == null && capabilityFlow.value.isSupported(CameraCapability.CaptureHeic) && heicSize != null) {
+            heicReader = ImageReader.newInstance(heicSize.width, heicSize.height, ImageFormat.HEIC, 2).apply {
+                setOnImageAvailableListener({ reader ->
+                    val image = reader.acquireNextImage()
+                    val target = nextHeicImage
+                    nextHeicImage = null
                     if (target != null) target.complete(image) else image.close()
                 }, handler)
             }
@@ -609,6 +713,16 @@ private class AndroidInternalCameraSession(
         }
     }
 
+    private fun closeJpegReader() {
+        jpegReader?.close()
+        jpegReader = null
+    }
+
+    private fun closeHeicReader() {
+        heicReader?.close()
+        heicReader = null
+    }
+
     private fun closeRawReader() {
         rawReader?.close()
         rawReader = null
@@ -619,12 +733,29 @@ private class AndroidInternalCameraSession(
         analysisReader = null
     }
 
+    private fun closeReaders() {
+        closeJpegReader()
+        closeHeicReader()
+        closeRawReader()
+        closeAnalysisReader()
+    }
+
     private fun captureFailure(format: CaptureFormat, debug: String): CaptureResult {
         val error = CameraError(
             type = CameraErrorType.CaptureFailed,
             userMessageZh = "拍摄失败",
             debugMessage = debug,
             fallbackSuggestionZh = "请先进入预览并保持相机连接。",
+        )
+        return CaptureResult(format = format, files = emptyList(), error = error)
+    }
+
+    private fun formatUnavailable(format: CaptureFormat, debug: String): CaptureResult {
+        val error = CameraError(
+            type = CameraErrorType.CaptureFailed,
+            userMessageZh = "${format.userLabel()} 当前不可用",
+            debugMessage = debug,
+            fallbackSuggestionZh = "预览已优先保持运行；请切换为 JPEG，或稍后重新进入相机后再试该格式。",
         )
         return CaptureResult(format = format, files = emptyList(), error = error)
     }
@@ -860,7 +991,9 @@ private fun buildCapabilities(
     characteristics: CameraCharacteristics,
 ): CameraCapabilities {
     val capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
+    val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
     val raw = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW in capabilities
+    val heic = streamMap?.getOutputSizes(ImageFormat.HEIC)?.isNotEmpty() == true
     val manualSensor = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in capabilities
     val hasEv = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) != null
     val hasWb = characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.isNotEmpty() == true
@@ -870,6 +1003,7 @@ private fun buildCapabilities(
         add(CameraCapability.Preview)
         add(CameraCapability.PreviewFrameAnalysis)
         add(CameraCapability.CaptureJpeg)
+        if (heic) add(CameraCapability.CaptureHeic)
         add(CameraCapability.Grid)
         add(CameraCapability.Zebra)
         add(CameraCapability.FocusPeaking)
@@ -902,6 +1036,7 @@ private fun buildCapabilities(
         settings = MutableRequestState(characteristics).descriptors(),
         rawDebugInfo = mapOf(
             "hardwareLevel" to hardwareLevelName(characteristics),
+            "heic" to heic,
             "raw" to raw,
             "manualSensor" to manualSensor,
             "maxAfRegions" to maxAfRegions,
@@ -961,6 +1096,19 @@ private fun buildWbChoices(modes: Set<Int>): List<SettingValue> {
     return modes.mapNotNull { mode -> labels[mode]?.let { SettingValue.Choice(mode.toString(), it) } }
 }
 
+private const val CameraOperationTimeoutMs = 7_000L
+private const val CompatibilityJpegMaxPixels = 12_000_000L
+
+private fun CaptureFormat.userLabel(): String {
+    return when (this) {
+        CaptureFormat.Jpeg -> "JPEG"
+        CaptureFormat.Heic -> "HEIC"
+        CaptureFormat.Raw -> "RAW"
+        CaptureFormat.RawAndJpeg -> "JPEG+RAW"
+        CaptureFormat.PreviewJpeg -> "预览 JPEG"
+    }
+}
+
 private fun formatShutter(nanos: Long): String {
     val seconds = nanos / 1_000_000_000.0
     return if (seconds >= 1.0) {
@@ -978,8 +1126,20 @@ private fun Array<Size>.largest(): Size {
     return maxBy { it.width.toLong() * it.height.toLong() }
 }
 
+private fun Array<Size>.bestStillSize(): Size {
+    if (isEmpty()) return Size(1920, 1080)
+    return filter { it.pixelCount() <= CompatibilityJpegMaxPixels }
+        .maxByOrNull { it.pixelCount() }
+        ?: minBy { it.pixelCount() }
+}
+
 private fun Array<Size>.closestTo(target: Size): Size {
+    if (isEmpty()) return target
     return minBy { abs((it.width * it.height) - (target.width * target.height)) }
+}
+
+private fun Size.pixelCount(): Long {
+    return width.toLong() * height.toLong()
 }
 
 private fun ByteBuffer.readBytes(): ByteArray {

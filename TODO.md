@@ -27,6 +27,10 @@
 - [x] 修复内置相机 Provider 权限不足时错误暴露太晚的问题：现在 connect 阶段即拒绝并返回权限错误。
 - [x] 增强 Camera2 预览启动鲁棒性：预览 session 配置失败时会依次禁用 RAW surface、分析 surface 后重试，并把预览错误显示到 UI。
 - [x] 实现 OPPO 专业相机交互启发的水平轮式参数调节：ISO / S / EV / WB 胶囊选择、中心刻度指示、拖动惯性、松手吸附、液态玻璃轮盘，并通过统一 `CameraSettingsController` 写回 Fake Provider 与 Camera2 Provider。
+- [x] 再次修复手机原生摄像头调用失败风险：默认优先后摄、TextureView 使用固定兼容预览 buffer、Camera2 打开/配置加入超时、JPEG 使用兼容尺寸、session 从 RAW/分析/JPEG 逐级降级到 preview-only。
+- [x] 修复液态玻璃 UI 过度透明导致交互控件重叠：玻璃材质加入更明确的深色承载层，参数/Debug 面板打开时隐藏快门和侧边工具栏，并加入背景遮罩防止视觉穿透和误触。
+- [x] 增加保存格式选择：底部拍摄栏按当前 `CameraCapabilities` 显示 JPEG / HEIC / RAW / JPEG+RAW；Camera2 通过系统 stream map 检测 HEIC/RAW 支持，MediaStore 按 JPEG/HEIC/RAW 分目录保存。
+- [x] 保存格式切换以预览优先：Camera2 session 会从 RAW/分析/HEIC/JPEG 逐级降级到 preview-only；如果所选格式在当前降级 session 中不可用，会返回结构化中文错误并保持预览运行。
 - [ ] 真机手动验收仍待执行：权限流程、内置相机实际预览、JPEG 保存、RAW/DNG 保存、触控对焦效果、UI 流畅度。
 - [ ] Sony PTP、UVC、Native/libusb 未进入本轮实现，仍按后续 Milestone 推进。
 

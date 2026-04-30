@@ -73,7 +73,16 @@ class CameraAppController(
         val allDevices = devices.value.ifEmpty {
             runCatching { registry.refreshDevices() }.getOrDefault(emptyList())
         }
-        val internal = allDevices.firstOrNull { it.connectionType == CameraConnectionType.Internal }
+        val internal = allDevices
+            .filter { it.connectionType == CameraConnectionType.Internal }
+            .minByOrNull { device ->
+                when (device.debugInfo["lensFacing"]) {
+                    "back" -> 0
+                    "external" -> 1
+                    "front" -> 2
+                    else -> 3
+                }
+            }
         val current = activeSession.value
 
         if (internal != null && !hasCameraPermission) {

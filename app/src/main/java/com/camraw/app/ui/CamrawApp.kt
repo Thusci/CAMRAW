@@ -87,6 +87,8 @@ import com.camraw.app.ui.theme.GlassControl
 import com.camraw.app.ui.theme.LiquidGlassSurface
 import com.camraw.app.ui.theme.PreviewBackdrop
 import com.camraw.app.ui.theme.ShutterButton
+import com.camraw.core.camera.api.CameraCapabilities
+import com.camraw.core.camera.api.CameraCapability
 import com.camraw.core.camera.api.CameraConnectionType
 import com.camraw.core.camera.api.CameraDeviceInfo
 import com.camraw.core.camera.api.CameraError
@@ -133,7 +135,7 @@ fun CamrawApp(
                 busy = busy,
                 status = status,
                 error = error,
-                onCapture = { controller.captureAsync(CaptureFormat.Jpeg) },
+                onCapture = { format -> controller.captureAsync(format) },
                 onRequestCameraPermission = onRequestCameraPermission,
                 onDisconnect = controller::closeSessionAsync,
             )
@@ -258,7 +260,7 @@ private fun CameraScreen(
     busy: Boolean,
     status: String,
     error: CameraError?,
-    onCapture: () -> Unit,
+    onCapture: (CaptureFormat) -> Unit,
     onRequestCameraPermission: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
@@ -268,10 +270,20 @@ private fun CameraScreen(
     var showGrid by remember { mutableStateOf(true) }
     var showHistogram by remember { mutableStateOf(false) }
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
+    val panelOpen = showSettings || showDebug
     val scope = rememberCoroutineScope()
     val captureState = session.capture?.captureState?.collectAsStateWithLifecycle()?.value ?: CaptureState.Idle
     val previewState = session.preview?.previewState?.collectAsStateWithLifecycle()?.value
         ?: com.camraw.core.camera.api.PreviewState()
+    val capabilities by session.capabilities.collectAsStateWithLifecycle()
+    val supportedFormats = remember(capabilities) { capabilities.supportedCaptureFormats() }
+    var selectedFormat by remember(session.sessionId) { mutableStateOf(supportedFormats.firstOrNull() ?: CaptureFormat.Jpeg) }
+
+    LaunchedEffect(supportedFormats) {
+        if (selectedFormat !in supportedFormats) {
+            selectedFormat = supportedFormats.firstOrNull() ?: CaptureFormat.Jpeg
+        }
+    }
 
     LaunchedEffect(session.sessionId) {
         session.preview?.frames?.collect { frame ->
@@ -284,8 +296,9 @@ private fun CameraScreen(
             .fillMaxSize()
             .background(Color.Black)
             .onSizeChanged { previewSize = it }
-            .pointerInput(session.sessionId, previewSize) {
+            .pointerInput(session.sessionId, previewSize, panelOpen) {
                 detectTapGestures { offset ->
+                    if (panelOpen) return@detectTapGestures
                     val width = previewSize.width.coerceAtLeast(1)
                     val height = previewSize.height.coerceAtLeast(1)
                     scope.launch {
@@ -316,27 +329,32 @@ private fun CameraScreen(
                 .statusBarsPadding()
                 .padding(14.dp),
         )
-        RightToolbar(
-            backdrop = backdrop,
-            showGrid = showGrid,
-            showHistogram = showHistogram,
-            onToggleGrid = { showGrid = !showGrid },
-            onToggleHistogram = { showHistogram = !showHistogram },
-            onSettings = { showSettings = true },
-            onDebug = { showDebug = true },
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 14.dp),
-        )
-        BottomCaptureBar(
-            backdrop = backdrop,
-            busy = busy || captureState !is CaptureState.Idle,
-            onCapture = onCapture,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 18.dp),
-        )
+        if (!panelOpen) {
+            RightToolbar(
+                backdrop = backdrop,
+                showGrid = showGrid,
+                showHistogram = showHistogram,
+                onToggleGrid = { showGrid = !showGrid },
+                onToggleHistogram = { showHistogram = !showHistogram },
+                onSettings = { showSettings = true },
+                onDebug = { showDebug = true },
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 14.dp),
+            )
+            BottomCaptureBar(
+                backdrop = backdrop,
+                busy = busy || captureState !is CaptureState.Idle,
+                selectedFormat = selectedFormat,
+                supportedFormats = supportedFormats,
+                onFormatSelected = { selectedFormat = it },
+                onCapture = { onCapture(selectedFormat) },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 18.dp),
+            )
+        }
         ErrorBanner(
             error = error ?: previewState.error,
             backdrop = backdrop,
@@ -345,7 +363,7 @@ private fun CameraScreen(
                 .statusBarsPadding()
                 .padding(top = 82.dp, start = 16.dp, end = 16.dp),
         )
-        if (showHistogram) {
+        if (showHistogram && !panelOpen) {
             HistogramPill(
                 backdrop = backdrop,
                 modifier = Modifier
@@ -354,6 +372,13 @@ private fun CameraScreen(
                     .padding(start = 18.dp, bottom = 34.dp),
             )
         }
+        PanelScrim(
+            visible = panelOpen,
+            onDismiss = {
+                showSettings = false
+                showDebug = false
+            },
+        )
         SettingsPanel(
             visible = showSettings,
             session = session,
@@ -372,6 +397,29 @@ private fun CameraScreen(
 }
 
 @Composable
+private fun PanelScrim(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(180)),
+        exit = fadeOut(animationSpec = tween(180)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.46f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+        )
+    }
+}
+
+@Composable
 private fun TopStatusBar(
     session: CameraSession,
     backdrop: PreviewBackdrop,
@@ -384,6 +432,7 @@ private fun TopStatusBar(
     LiquidGlassSurface(
         modifier = modifier.fillMaxWidth(),
         backdrop = backdrop,
+        materialOpacity = 0.48f,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -439,15 +488,98 @@ private fun RightToolbar(
 private fun BottomCaptureBar(
     backdrop: PreviewBackdrop,
     busy: Boolean,
+    selectedFormat: CaptureFormat,
+    supportedFormats: List<CaptureFormat>,
+    onFormatSelected: (CaptureFormat) -> Unit,
     onCapture: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Column(
         modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        ShutterButton(busy = busy, backdrop = backdrop, onClick = onCapture)
+        CaptureFormatSelector(
+            formats = supportedFormats,
+            selectedFormat = selectedFormat,
+            backdrop = backdrop,
+            onSelect = onFormatSelected,
+            modifier = Modifier.padding(bottom = 12.dp),
+        )
+        Row(
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ShutterButton(busy = busy, backdrop = backdrop, onClick = onCapture)
+        }
+    }
+}
+
+@Composable
+private fun CaptureFormatSelector(
+    formats: List<CaptureFormat>,
+    selectedFormat: CaptureFormat,
+    backdrop: PreviewBackdrop,
+    onSelect: (CaptureFormat) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (formats.isEmpty()) return
+    LiquidGlassSurface(
+        modifier = modifier,
+        backdrop = backdrop,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+        blurRadius = 22.dp,
+        tonalOpacity = 0.42f,
+        materialOpacity = 0.56f,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 7.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            formats.forEach { format ->
+                CaptureFormatChip(
+                    format = format,
+                    selected = format == selectedFormat,
+                    onClick = { onSelect(format) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptureFormatChip(
+    format: CaptureFormat,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (selected) 1.04f else 1f,
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMedium),
+        label = "format-chip-scale",
+    )
+    Box(
+        modifier = Modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .background(
+                color = if (selected) Color.White.copy(alpha = 0.18f) else Color.Transparent,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(horizontal = 11.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = format.displayLabel(),
+            color = if (selected) Color(0xFFB9ECFF) else Color.White.copy(alpha = 0.78f),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            maxLines = 1,
+        )
     }
 }
 
@@ -570,6 +702,7 @@ private fun ProSettingChip(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
         blurRadius = if (selected) 28.dp else 18.dp,
         tonalOpacity = if (selected) 0.70f else 0.46f,
+        materialOpacity = if (selected) 0.56f else 0.44f,
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
     ) {
         Column(
@@ -652,6 +785,7 @@ private fun ProParameterWheel(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
         blurRadius = 30.dp,
         tonalOpacity = 0.64f,
+        materialOpacity = 0.62f,
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
     ) {
         Column {
@@ -787,6 +921,30 @@ private fun ProParameterWheel(
 
 private val ProSettingOrder = listOf("iso", "shutter", "ev", "wb")
 
+private const val CameraPreviewBufferWidth = 1280
+private const val CameraPreviewBufferHeight = 720
+
+private fun CameraCapabilities.supportedCaptureFormats(): List<CaptureFormat> {
+    return buildList {
+        if (isSupported(CameraCapability.CaptureJpeg)) add(CaptureFormat.Jpeg)
+        if (isSupported(CameraCapability.CaptureHeic)) add(CaptureFormat.Heic)
+        if (isSupported(CameraCapability.CaptureRaw)) add(CaptureFormat.Raw)
+        if (isSupported(CameraCapability.CaptureRawJpeg) && isSupported(CameraCapability.CaptureJpeg)) {
+            add(CaptureFormat.RawAndJpeg)
+        }
+    }
+}
+
+private fun CaptureFormat.displayLabel(): String {
+    return when (this) {
+        CaptureFormat.Jpeg -> "JPEG"
+        CaptureFormat.Heic -> "HEIC"
+        CaptureFormat.Raw -> "RAW"
+        CaptureFormat.RawAndJpeg -> "J+RAW"
+        CaptureFormat.PreviewJpeg -> "PREV"
+    }
+}
+
 private fun CameraSettingDescriptor.shortLabel(): String {
     return when (id) {
         "iso" -> "ISO"
@@ -889,6 +1047,7 @@ private fun HistogramPill(backdrop: PreviewBackdrop, modifier: Modifier = Modifi
     LiquidGlassSurface(
         modifier = modifier,
         backdrop = backdrop,
+        materialOpacity = 0.48f,
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(
@@ -920,15 +1079,18 @@ private fun CameraPreviewHost(session: CameraSession, modifier: Modifier = Modif
                     private var surface: Surface? = null
 
                     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-                        texture.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                        texture.setDefaultBufferSize(
+                            CameraPreviewBufferWidth,
+                            CameraPreviewBufferHeight,
+                        )
                         surface = Surface(texture)
                         scope.launch {
                             runCatching {
                                 session.preview?.bind(
                                     PreviewSurface(
                                         nativeSurface = surface ?: return@runCatching,
-                                        width = width,
-                                        height = height,
+                                        width = CameraPreviewBufferWidth,
+                                        height = CameraPreviewBufferHeight,
                                         rotationDegrees = when (display?.rotation) {
                                             Surface.ROTATION_90 -> 90
                                             Surface.ROTATION_180 -> 180
@@ -942,7 +1104,10 @@ private fun CameraPreviewHost(session: CameraSession, modifier: Modifier = Modif
                     }
 
                     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
-                        texture.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                        texture.setDefaultBufferSize(
+                            CameraPreviewBufferWidth,
+                            CameraPreviewBufferHeight,
+                        )
                     }
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {

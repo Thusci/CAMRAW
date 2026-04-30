@@ -171,6 +171,7 @@ private fun StorageWriteRequest.collectionUri(): Uri {
         CameraObjectKind.Video -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         CameraObjectKind.Sidecar -> MediaStore.Files.getContentUri("external")
         CameraObjectKind.Raw,
+        CameraObjectKind.Heic,
         CameraObjectKind.Jpeg,
         CameraObjectKind.Preview -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
     }
@@ -181,6 +182,7 @@ private fun StorageWriteRequest.relativePath(rootDirectoryName: String): String 
     val type = when (kind) {
         CameraObjectKind.Raw -> "RAW"
         CameraObjectKind.Jpeg -> "JPEG"
+        CameraObjectKind.Heic -> "HEIC"
         CameraObjectKind.Preview -> "PREVIEW"
         CameraObjectKind.Video -> "VIDEO"
         CameraObjectKind.Sidecar -> "SIDECAR"

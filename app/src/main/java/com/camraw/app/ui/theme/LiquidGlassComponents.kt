@@ -54,6 +54,7 @@ fun LiquidGlassSurface(
     shape: Shape = RoundedCornerShape(28.dp),
     blurRadius: Dp = 24.dp,
     tonalOpacity: Float = 0.42f,
+    materialOpacity: Float = 0.30f,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     content: @Composable BoxScope.() -> Unit,
 ) {
@@ -78,6 +79,11 @@ fun LiquidGlassSurface(
             .drawWithCache {
                 val noiseStep = 9.dp.toPx().coerceAtLeast(6f)
                 onDrawWithContent {
+                    drawRect(
+                        color = Color(0xFF070A0D).copy(
+                            alpha = (materialOpacity + (1f - animatedLuma) * 0.08f).coerceIn(0f, 0.86f),
+                        ),
+                    )
                     drawRect(
                         brush = Brush.linearGradient(
                             colors = listOf(cool, base, warm),
@@ -162,6 +168,7 @@ fun GlassControl(
         shape = RoundedCornerShape(18.dp),
         blurRadius = if (selected) 30.dp else 20.dp,
         tonalOpacity = if (selected) 0.62f else 0.42f,
+        materialOpacity = if (selected) 0.46f else 0.36f,
     ) {
         IconButton(onClick = onClick) {
             Icon(
@@ -189,6 +196,7 @@ fun GlassTextButton(
         backdrop = backdrop,
         shape = RoundedCornerShape(999.dp),
         blurRadius = 18.dp,
+        materialOpacity = 0.42f,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Text(text = text, style = MaterialTheme.typography.labelLarge)
@@ -220,7 +228,8 @@ fun GlassBottomSheet(
             backdrop = backdrop,
             shape = RoundedCornerShape(topStart = 34.dp, topEnd = 34.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
             blurRadius = 34.dp,
-            tonalOpacity = 0.72f,
+            tonalOpacity = 0.64f,
+            materialOpacity = 0.72f,
             contentPadding = PaddingValues(20.dp),
             content = content,
         )
@@ -260,6 +269,7 @@ fun ShutterButton(
             shape = RoundedCornerShape(999.dp),
             blurRadius = 30.dp,
             tonalOpacity = 0.82f,
+            materialOpacity = 0.44f,
         ) {
             Canvas(modifier = Modifier.matchParentSize()) {
                 drawCircle(
